@@ -1,0 +1,24 @@
+name: metric_hours
+description: Registro de actividades y gestion de tiempo personal con proyectos.
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cross_file: ^0.3.5+5
+  path_provider: ^2.1.6
+  share_plus: ^13.3.0
+  speech_to_text: ^7.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
