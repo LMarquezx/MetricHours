@@ -4,67 +4,30 @@ import 'dart:io';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
-/// Escribe cada linea de log a un archivo local y lo sincroniza con la
-/// carpeta de Descargas del dispositivo (via MediaStore en Android 10+).
-class LogService {
-  LogService._();
-
-  static const _channel = MethodChannel('metric_hours/log_writer');
-  static const _fileName = 'metric_hours_log.txt';
-  static final StringBuffer _buffer = StringBuffer();
-  static File? _localFile;
-
-  static Future<void> log(String message) async {
-    final timestamp = DateTime.now().toIso8601String();
-    final line = '[$timestamp] $message';
-    debugPrint(line);
-    _buffer.writeln(line);
-
-    try {
-      _localFile ??= await _resolveLocalFile();
-      await _localFile!.writeAsString(_buffer.toString(), flush: true);
-    } catch (error) {
-      debugPrint('LogService: fallo al escribir log local -> $error');
-    }
-
-    try {
-      final savedAt = await _channel.invokeMethod<String>('writeLog', {
-        'fileName': _fileName,
-        'content': _buffer.toString(),
-      });
-      debugPrint('LogService: log sincronizado en $savedAt');
-    } catch (error) {
-      debugPrint('LogService: fallo al escribir en Descargas -> $error');
-    }
-  }
-
-  static Future<File> _resolveLocalFile() async {
-    final directory = await getApplicationDocumentsDirectory();
-    return File('${directory.path}/$_fileName');
-  }
-}
+import 'models/proyecto_dto.dart';
+import 'models/registro_hora_dto.dart';
+import 'services/log_service.dart';
+import 'services/local_storage_service.dart';
 
 void main() {
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
-    unawaited(LogService.log('=== FlutterError ===\n'
+    unawaited(
+      LogService.log(
+        '=== FlutterError ===\n'
         '${details.exceptionAsString()}\n'
-        '${details.stack}'));
+        '${details.stack}',
+      ),
+    );
   };
-  runZonedGuarded(
-    () => runApp(const MetricHoursApp()),
-    (error, stack) {
-      unawaited(
-        LogService.log('=== Uncaught zone error ===\n$error\n$stack'),
-      );
-    },
-  );
+  runZonedGuarded(() => runApp(const MetricHoursApp()), (error, stack) {
+    unawaited(LogService.log('=== Uncaught zone error ===\n$error\n$stack'));
+  });
 }
 
 class MetricHoursApp extends StatefulWidget {
@@ -80,8 +43,9 @@ class _MetricHoursAppState extends State<MetricHoursApp> {
   @override
   void initState() {
     super.initState();
-    controller = AppController(LocalRepository(), ExportService());
-    unawaited(controller.load());
+    controller = AppController(LocalStorageService(), ExportService());
+    // La carga del almacenamiento del dispositivo arranca cuando el usuario
+    // elige "Usar en local" en WelcomeScreen.
   }
 
   @override
@@ -117,7 +81,74 @@ class _MetricHoursAppState extends State<MetricHoursApp> {
             ),
           ),
         ),
-        home: const AppShell(),
+        home: const WelcomeScreen(),
+      ),
+    );
+  }
+}
+
+/// Pantalla inicial: elegir entre usar los datos guardados en este dispositivo
+/// o iniciar sesion con Google. El login todavia no esta implementado.
+class WelcomeScreen extends StatelessWidget {
+  const WelcomeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.asset(
+                  'assets/icon/Logo_app.png',
+                  width: 260,
+                  height: 96,
+                  fit: BoxFit.contain,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'Metric Hours',
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Elige como quieres continuar',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Usar en local'),
+                    onPressed: () {
+                      final app = AppScope.of(context);
+                      if (!app.isLoaded) {
+                        unawaited(app.load());
+                      }
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(builder: (_) => const AppShell()),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.login),
+                    label: const Text('Iniciar sesion con Google'),
+                    onPressed: () {},
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -515,9 +546,7 @@ class _NewActivitySheetState extends State<_NewActivitySheet> {
               prefixIcon: const Icon(Icons.edit_note),
               suffixIcon: IconButton(
                 tooltip: speechBusy ? 'Detener voz' : 'Dictar voz',
-                icon: Icon(
-                  speechBusy ? Icons.mic : Icons.mic_none_outlined,
-                ),
+                icon: Icon(speechBusy ? Icons.mic : Icons.mic_none_outlined),
                 onPressed: _toggleSpeech,
               ),
             ),
@@ -760,7 +789,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
         );
       },
     );
-    await LogService.log('_showProjectDialog: resultado del dialogo = "$result"');
+    await LogService.log(
+      '_showProjectDialog: resultado del dialogo = "$result"',
+    );
 
     if (result == null) {
       await LogService.log('_showProjectDialog: cancelado por el usuario');
@@ -782,7 +813,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
         await LogService.log('_showProjectDialog: renameProject OK');
       }
     } on AppException catch (error) {
-      await LogService.log('_showProjectDialog: AppException -> ${error.message}');
+      await LogService.log(
+        '_showProjectDialog: AppException -> ${error.message}',
+      );
       if (context.mounted) {
         _showMessage(context, error.message);
       }
@@ -1489,16 +1522,15 @@ class IconLabel extends StatelessWidget {
 }
 
 class AppController extends ChangeNotifier {
-  AppController(this.repository, this.exportService);
+  AppController(this.localStorage, this.exportService);
 
-  final LocalRepository repository;
+  final LocalStorageService localStorage;
   final ExportService exportService;
   final List<Project> projects = [];
   final List<ActivityEntry> activities = [];
   DateTime selectedDay = dayOnly(DateTime.now());
   DateTime reportStart = dayOnly(DateTime.now());
   DateTime reportEnd = dayOnly(DateTime.now());
-  String lastOpenedDayKey = dateKey(DateTime.now());
   bool isLoaded = false;
   Timer? _ticker;
   Timer? _midnightTimer;
@@ -1509,34 +1541,50 @@ class AppController extends ChangeNotifier {
   ActivityEntry? get runningActivity =>
       activities.where((activity) => activity.isRunning).firstOrNull;
 
+  /// Carga los datos que se guardaron previamente en este dispositivo.
   Future<void> load() async {
-    final snapshot = await repository.load();
-    projects
-      ..clear()
-      ..addAll(snapshot.projects);
-    activities
-      ..clear()
-      ..addAll(snapshot.activities);
-    lastOpenedDayKey = snapshot.lastOpenedDayKey ?? dateKey(DateTime.now());
+    try {
+      final data = await localStorage.read();
+      final storedProjects = (data['projects'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(Project.fromLocalJson);
+      projects
+        ..clear()
+        ..addAll(storedProjects);
 
-    if (projects.isEmpty) {
-      projects.add(Project.create('Personal', color: projectColors.first));
+      final storedActivities =
+          (data['activities'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(ActivityEntry.fromLocalJson);
+      activities
+        ..clear()
+        ..addAll(storedActivities);
+
+      if (projects.isEmpty) {
+        await addProject('Personal');
+      }
+
+      selectedDay = dayOnly(DateTime.now());
+      reportStart = selectedDay;
+      reportEnd = selectedDay;
+    } catch (error) {
+      await LogService.log(
+        'AppController.load: fallo cargando datos locales -> $error',
+      );
     }
 
-    _applyDailyRollover(DateTime.now());
     _startTicker();
     _scheduleMidnightRollover();
     isLoaded = true;
     notifyListeners();
-    await _save();
   }
 
-  void selectDay(DateTime value) {
+  Future<void> selectDay(DateTime value) async {
     selectedDay = dayOnly(value);
     notifyListeners();
   }
 
-  void setReportRange(DateTime start, DateTime end) {
+  Future<void> setReportRange(DateTime start, DateTime end) async {
     var normalizedStart = dayOnly(start);
     var normalizedEnd = dayOnly(end);
     if (normalizedEnd.isBefore(normalizedStart)) {
@@ -1611,29 +1659,23 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> addProject(String rawName, {int? color}) async {
-    await LogService.log('AppController.addProject: rawName="$rawName"');
     final name = rawName.trim();
     if (name.isEmpty) {
       throw const AppException('Escribe un nombre de proyecto.');
     }
-    final exists = projects.any(
-      (project) => project.name.toLowerCase() == name.toLowerCase(),
+    final chosenColor =
+        color ?? projectColors[projects.length % projectColors.length];
+    projects.add(
+      Project(
+        id: _newId(),
+        name: name,
+        color: chosenColor,
+        isActive: true,
+        createdAt: DateTime.now(),
+      ),
     );
-    if (exists) {
-      throw const AppException('Ya existe un proyecto con ese nombre.');
-    }
-    final newProject = Project.create(
-      name,
-      color: color ?? projectColors[projects.length % projectColors.length],
-    );
-    await LogService.log(
-      'AppController.addProject: creado id=${newProject.id} color=${newProject.color}',
-    );
-    projects.add(newProject);
-    notifyListeners();
-    await LogService.log('AppController.addProject: notifyListeners() emitido');
     await _save();
-    await LogService.log('AppController.addProject: _save() completado');
+    notifyListeners();
   }
 
   Future<void> renameProject(String id, String rawName, {int? color}) async {
@@ -1641,20 +1683,16 @@ class AppController extends ChangeNotifier {
     if (name.isEmpty) {
       throw const AppException('Escribe un nombre de proyecto.');
     }
-    final exists = projects.any(
-      (project) =>
-          project.id != id && project.name.toLowerCase() == name.toLowerCase(),
-    );
-    if (exists) {
-      throw const AppException('Ya existe un proyecto con ese nombre.');
-    }
+    final current = projectById(id);
     final index = projects.indexWhere((project) => project.id == id);
-    if (index == -1) {
-      return;
+    if (index != -1) {
+      projects[index] = current.copyWith(
+        name: name,
+        color: color ?? current.color,
+      );
     }
-    projects[index] = projects[index].copyWith(name: name, color: color);
-    notifyListeners();
     await _save();
+    notifyListeners();
   }
 
   Future<void> setProjectActive(String id, bool isActive) async {
@@ -1665,16 +1703,15 @@ class AppController extends ChangeNotifier {
     }
 
     final index = projects.indexWhere((project) => project.id == id);
-    if (index == -1) {
-      return;
+    if (index != -1) {
+      projects[index] = projects[index].copyWith(
+        isActive: isActive,
+        archivedAt: isActive ? null : DateTime.now(),
+        clearArchivedAt: isActive,
+      );
     }
-    projects[index] = projects[index].copyWith(
-      isActive: isActive,
-      archivedAt: isActive ? null : DateTime.now(),
-      clearArchivedAt: isActive,
-    );
-    notifyListeners();
     await _save();
+    notifyListeners();
   }
 
   Future<void> startActivity({
@@ -1695,16 +1732,17 @@ class AppController extends ChangeNotifier {
       );
     }
 
-    activities.add(
-      ActivityEntry.create(
+    _upsertActivity(
+      ActivityEntry(
+        id: _newId(),
         projectId: projectId,
         description: cleanDescription,
         startAt: DateTime.now(),
       ),
     );
     selectedDay = dayOnly(DateTime.now());
-    notifyListeners();
     await _save();
+    notifyListeners();
   }
 
   Future<void> stopActivity(String id) async {
@@ -1712,13 +1750,12 @@ class AppController extends ChangeNotifier {
     if (index == -1) {
       return;
     }
-    final activity = activities[index];
-    if (!activity.isRunning) {
+    if (!activities[index].isRunning) {
       return;
     }
-    activities[index] = activity.copyWith(endAt: DateTime.now());
-    notifyListeners();
+    activities[index] = activities[index].copyWith(endAt: DateTime.now());
     await _save();
+    notifyListeners();
   }
 
   Future<File> exportCsv() async {
@@ -1740,25 +1777,21 @@ class AppController extends ChangeNotifier {
     return file;
   }
 
-  void _applyDailyRollover(DateTime now) {
-    final todayKey = dateKey(now);
-    if (lastOpenedDayKey == todayKey) {
-      return;
+  void _upsertActivity(ActivityEntry entry) {
+    final index = activities.indexWhere((activity) => activity.id == entry.id);
+    if (index == -1) {
+      activities.add(entry);
+    } else {
+      activities[index] = entry;
     }
-
-    final todayMidnight = dayOnly(now);
-    for (var index = 0; index < activities.length; index += 1) {
-      final activity = activities[index];
-      if (activity.isRunning && activity.startAt.isBefore(todayMidnight)) {
-        final activityNextMidnight = dayOnly(
-          activity.startAt,
-        ).add(const Duration(days: 1));
-        activities[index] = activity.copyWith(endAt: activityNextMidnight);
-      }
-    }
-    lastOpenedDayKey = todayKey;
-    selectedDay = todayMidnight;
   }
+
+  Future<void> _save() => localStorage.write(
+    projects: projects.map((project) => project.toLocalJson()).toList(),
+    activities: activities.map((activity) => activity.toLocalJson()).toList(),
+  );
+
+  String _newId() => DateTime.now().microsecondsSinceEpoch.toString();
 
   void _startTicker() {
     _ticker?.cancel();
@@ -1769,6 +1802,7 @@ class AppController extends ChangeNotifier {
     });
   }
 
+  /// Al cruzar la medianoche, el Registro vuelve a apuntar a "hoy".
   void _scheduleMidnightRollover() {
     _midnightTimer?.cancel();
     final now = DateTime.now();
@@ -1776,21 +1810,9 @@ class AppController extends ChangeNotifier {
     final delay =
         nextMidnight.difference(now) + const Duration(milliseconds: 300);
     _midnightTimer = Timer(delay, () {
-      _applyDailyRollover(DateTime.now());
-      notifyListeners();
-      unawaited(_save());
+      unawaited(selectDay(DateTime.now()));
       _scheduleMidnightRollover();
     });
-  }
-
-  Future<void> _save() async {
-    await repository.save(
-      DataSnapshot(
-        projects: projects,
-        activities: activities,
-        lastOpenedDayKey: lastOpenedDayKey,
-      ),
-    );
   }
 
   @override
@@ -1798,35 +1820,6 @@ class AppController extends ChangeNotifier {
     _ticker?.cancel();
     _midnightTimer?.cancel();
     super.dispose();
-  }
-}
-
-class LocalRepository {
-  Future<DataSnapshot> load() async {
-    final file = await _dataFile();
-    if (!await file.exists()) {
-      return const DataSnapshot(projects: [], activities: []);
-    }
-
-    final content = await file.readAsString();
-    if (content.trim().isEmpty) {
-      return const DataSnapshot(projects: [], activities: []);
-    }
-
-    final jsonMap = jsonDecode(content) as Map<String, dynamic>;
-    return DataSnapshot.fromJson(jsonMap);
-  }
-
-  Future<void> save(DataSnapshot snapshot) async {
-    final file = await _dataFile();
-    await file.parent.create(recursive: true);
-    const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(encoder.convert(snapshot.toJson()));
-  }
-
-  Future<File> _dataFile() async {
-    final directory = await getApplicationDocumentsDirectory();
-    return File('${directory.path}/metric_hours_data.json');
   }
 }
 
@@ -1880,38 +1873,6 @@ class ExportService {
   }
 }
 
-class DataSnapshot {
-  const DataSnapshot({
-    required this.projects,
-    required this.activities,
-    this.lastOpenedDayKey,
-  });
-
-  final List<Project> projects;
-  final List<ActivityEntry> activities;
-  final String? lastOpenedDayKey;
-
-  factory DataSnapshot.fromJson(Map<String, dynamic> json) {
-    return DataSnapshot(
-      projects: (json['projects'] as List<dynamic>? ?? [])
-          .map((value) => Project.fromJson(value as Map<String, dynamic>))
-          .toList(),
-      activities: (json['activities'] as List<dynamic>? ?? [])
-          .map((value) => ActivityEntry.fromJson(value as Map<String, dynamic>))
-          .toList(),
-      lastOpenedDayKey: json['lastOpenedDayKey'] as String?,
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'projects': projects.map((project) => project.toJson()).toList(),
-      'activities': activities.map((activity) => activity.toJson()).toList(),
-      'lastOpenedDayKey': lastOpenedDayKey,
-    };
-  }
-}
-
 class Project {
   const Project({
     required this.id,
@@ -1919,6 +1880,8 @@ class Project {
     required this.color,
     required this.isActive,
     required this.createdAt,
+    this.descripcion,
+    this.presupuestoHoras,
     this.archivedAt,
   });
 
@@ -1927,25 +1890,33 @@ class Project {
   final int color;
   final bool isActive;
   final DateTime createdAt;
+  final String? descripcion;
+  final int? presupuestoHoras;
   final DateTime? archivedAt;
 
-  factory Project.create(String name, {required int color}) {
+  factory Project.fromDto(ProyectoDto dto) {
+    final isActive = dto.estado == EstadoProyectoDto.activo;
     return Project(
-      id: createId('project'),
-      name: name,
-      color: color,
-      isActive: true,
-      createdAt: DateTime.now(),
+      id: dto.id,
+      name: dto.nombre,
+      color: colorFromHex(dto.color),
+      isActive: isActive,
+      createdAt: dto.fechaCreacion.toLocal(),
+      descripcion: dto.descripcion,
+      presupuestoHoras: dto.presupuestoHoras,
+      archivedAt: isActive ? null : dto.fechaActualizacion.toLocal(),
     );
   }
 
-  factory Project.fromJson(Map<String, dynamic> json) {
+  factory Project.fromLocalJson(Map<String, dynamic> json) {
     return Project(
       id: json['id'] as String,
       name: json['name'] as String,
       color: json['color'] as int,
-      isActive: json['isActive'] as bool? ?? true,
+      isActive: json['isActive'] as bool,
       createdAt: DateTime.parse(json['createdAt'] as String),
+      descripcion: json['descripcion'] as String?,
+      presupuestoHoras: json['presupuestoHoras'] as int?,
       archivedAt: json['archivedAt'] == null
           ? null
           : DateTime.parse(json['archivedAt'] as String),
@@ -1965,20 +1936,22 @@ class Project {
       color: color ?? this.color,
       isActive: isActive ?? this.isActive,
       createdAt: createdAt,
+      descripcion: descripcion,
+      presupuestoHoras: presupuestoHoras,
       archivedAt: clearArchivedAt ? null : archivedAt ?? this.archivedAt,
     );
   }
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'name': name,
-      'color': color,
-      'isActive': isActive,
-      'createdAt': createdAt.toIso8601String(),
-      'archivedAt': archivedAt?.toIso8601String(),
-    };
-  }
+  Map<String, dynamic> toLocalJson() => {
+    'id': id,
+    'name': name,
+    'color': color,
+    'isActive': isActive,
+    'createdAt': createdAt.toIso8601String(),
+    'descripcion': descripcion,
+    'presupuestoHoras': presupuestoHoras,
+    'archivedAt': archivedAt?.toIso8601String(),
+  };
 }
 
 class ActivityEntry {
@@ -2006,20 +1979,34 @@ class ActivityEntry {
     return finish.difference(startAt);
   }
 
-  factory ActivityEntry.create({
-    required String projectId,
-    required String description,
-    required DateTime startAt,
-  }) {
+  /// El backend distingue TIMER (con `horaInicio`/`horaFin` reales) de
+  /// MANUAL (solo `fecha` + `horas`, sin marcas de tiempo). Para un MANUAL
+  /// se ancla al inicio del dia y se deriva un `endAt` a partir de `horas`,
+  /// asi el resto del modelo (duracion, orden, filtrado por dia) no necesita
+  /// distinguir entre origenes.
+  factory ActivityEntry.fromDto(RegistroHoraDto dto) {
+    if (dto.origen == OrigenRegistroDto.timer) {
+      return ActivityEntry(
+        id: dto.id,
+        projectId: dto.proyectoId,
+        description: dto.descripcion,
+        startAt: (dto.horaInicio ?? dto.fecha).toLocal(),
+        endAt: dto.horaFin?.toLocal(),
+      );
+    }
+
+    final dayStart = DateTime(dto.fecha.year, dto.fecha.month, dto.fecha.day);
+    final duration = Duration(seconds: (dto.horas.toDouble() * 3600).round());
     return ActivityEntry(
-      id: createId('activity'),
-      projectId: projectId,
-      description: description,
-      startAt: startAt,
+      id: dto.id,
+      projectId: dto.proyectoId,
+      description: dto.descripcion,
+      startAt: dayStart,
+      endAt: dayStart.add(duration),
     );
   }
 
-  factory ActivityEntry.fromJson(Map<String, dynamic> json) {
+  factory ActivityEntry.fromLocalJson(Map<String, dynamic> json) {
     return ActivityEntry(
       id: json['id'] as String,
       projectId: json['projectId'] as String,
@@ -2031,25 +2018,21 @@ class ActivityEntry {
     );
   }
 
-  ActivityEntry copyWith({DateTime? endAt}) {
-    return ActivityEntry(
-      id: id,
-      projectId: projectId,
-      description: description,
-      startAt: startAt,
-      endAt: endAt ?? this.endAt,
-    );
-  }
+  ActivityEntry copyWith({DateTime? endAt}) => ActivityEntry(
+    id: id,
+    projectId: projectId,
+    description: description,
+    startAt: startAt,
+    endAt: endAt ?? this.endAt,
+  );
 
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'projectId': projectId,
-      'description': description,
-      'startAt': startAt.toIso8601String(),
-      'endAt': endAt?.toIso8601String(),
-    };
-  }
+  Map<String, dynamic> toLocalJson() => {
+    'id': id,
+    'projectId': projectId,
+    'description': description,
+    'startAt': startAt.toIso8601String(),
+    'endAt': endAt?.toIso8601String(),
+  };
 }
 
 class ProjectTotal {
@@ -2080,8 +2063,17 @@ const projectColors = [
   0xFF52606D,
 ];
 
-String createId(String prefix) {
-  return '${prefix}_${DateTime.now().microsecondsSinceEpoch}';
+/// El backend guarda el color como string libre; se usa `#RRGGBB` (siempre
+/// opaco, como los colores de [projectColors]) para poder ir y venir sin
+/// perder informacion.
+String colorToHex(int argb) =>
+    '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+
+int colorFromHex(String? hex) {
+  if (hex == null) return projectColors.first;
+  final value = int.tryParse(hex.replaceFirst('#', ''), radix: 16);
+  if (value == null) return projectColors.first;
+  return 0xFF000000 | value;
 }
 
 DateTime dayOnly(DateTime value) {
@@ -2159,7 +2151,16 @@ List<MapEntry<DateTime, Duration>> dailyDurations(
   ];
 }
 
-const _weekdayShortNames = ['', 'lun', 'mar', 'mie', 'jue', 'vie', 'sab', 'dom'];
+const _weekdayShortNames = [
+  '',
+  'lun',
+  'mar',
+  'mie',
+  'jue',
+  'vie',
+  'sab',
+  'dom',
+];
 
 String dayShortLabel(DateTime day) {
   final now = DateTime.now();
