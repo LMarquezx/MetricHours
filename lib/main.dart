@@ -3,13 +3,67 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+/// Escribe cada linea de log a un archivo local y lo sincroniza con la
+/// carpeta de Descargas del dispositivo (via MediaStore en Android 10+).
+class LogService {
+  LogService._();
+
+  static const _channel = MethodChannel('metric_hours/log_writer');
+  static const _fileName = 'metric_hours_log.txt';
+  static final StringBuffer _buffer = StringBuffer();
+  static File? _localFile;
+
+  static Future<void> log(String message) async {
+    final timestamp = DateTime.now().toIso8601String();
+    final line = '[$timestamp] $message';
+    debugPrint(line);
+    _buffer.writeln(line);
+
+    try {
+      _localFile ??= await _resolveLocalFile();
+      await _localFile!.writeAsString(_buffer.toString(), flush: true);
+    } catch (error) {
+      debugPrint('LogService: fallo al escribir log local -> $error');
+    }
+
+    try {
+      final savedAt = await _channel.invokeMethod<String>('writeLog', {
+        'fileName': _fileName,
+        'content': _buffer.toString(),
+      });
+      debugPrint('LogService: log sincronizado en $savedAt');
+    } catch (error) {
+      debugPrint('LogService: fallo al escribir en Descargas -> $error');
+    }
+  }
+
+  static Future<File> _resolveLocalFile() async {
+    final directory = await getApplicationDocumentsDirectory();
+    return File('${directory.path}/$_fileName');
+  }
+}
+
 void main() {
-  runApp(const MetricHoursApp());
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    unawaited(LogService.log('=== FlutterError ===\n'
+        '${details.exceptionAsString()}\n'
+        '${details.stack}'));
+  };
+  runZonedGuarded(
+    () => runApp(const MetricHoursApp()),
+    (error, stack) {
+      unawaited(
+        LogService.log('=== Uncaught zone error ===\n$error\n$stack'),
+      );
+    },
+  );
 }
 
 class MetricHoursApp extends StatefulWidget {
@@ -535,52 +589,103 @@ class _ProjectsPageState extends State<ProjectsPage> {
     AppController app, {
     Project? project,
   }) async {
-    final controller = TextEditingController(text: project?.name ?? '');
+    unawaited(
+      LogService.log(
+        '_showProjectDialog: abriendo (project=${project?.id ?? "nuevo"})',
+      ),
+    );
     final result = await showDialog<String>(
       context: context,
       builder: (context) {
-        return AlertDialog(
-          title: Text(project == null ? 'Alta de proyecto' : 'Renombrar'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            decoration: const InputDecoration(
-              labelText: 'Nombre',
-              prefixIcon: Icon(Icons.folder_outlined),
-            ),
-            textCapitalization: TextCapitalization.sentences,
-            onSubmitted: (value) => Navigator.of(context).pop(value),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancelar'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(controller.text),
-              child: const Text('Guardar'),
-            ),
-          ],
+        return _ProjectNameDialog(
+          initialName: project?.name ?? '',
+          isRename: project != null,
         );
       },
     );
-    controller.dispose();
+    await LogService.log('_showProjectDialog: resultado del dialogo = "$result"');
 
     if (result == null) {
+      await LogService.log('_showProjectDialog: cancelado por el usuario');
       return;
     }
 
     try {
       if (project == null) {
+        await LogService.log('_showProjectDialog: llamando addProject("$result")');
         await app.addProject(result);
+        await LogService.log('_showProjectDialog: addProject OK');
       } else {
+        await LogService.log(
+          '_showProjectDialog: llamando renameProject(${project.id}, "$result")',
+        );
         await app.renameProject(project.id, result);
+        await LogService.log('_showProjectDialog: renameProject OK');
       }
     } on AppException catch (error) {
+      await LogService.log('_showProjectDialog: AppException -> ${error.message}');
       if (context.mounted) {
         _showMessage(context, error.message);
       }
+    } catch (error, stackTrace) {
+      await LogService.log(
+        '_showProjectDialog: ERROR no manejado -> $error\n$stackTrace',
+      );
+      rethrow;
     }
+  }
+}
+
+class _ProjectNameDialog extends StatefulWidget {
+  const _ProjectNameDialog({required this.initialName, required this.isRename});
+
+  final String initialName;
+  final bool isRename;
+
+  @override
+  State<_ProjectNameDialog> createState() => _ProjectNameDialogState();
+}
+
+class _ProjectNameDialogState extends State<_ProjectNameDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialName);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.isRename ? 'Renombrar' : 'Alta de proyecto'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(
+          labelText: 'Nombre',
+          prefixIcon: Icon(Icons.folder_outlined),
+        ),
+        textCapitalization: TextCapitalization.sentences,
+        onSubmitted: (value) => Navigator.of(context).pop(value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancelar'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('Guardar'),
+        ),
+      ],
+    );
   }
 }
 
@@ -1107,6 +1212,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> addProject(String rawName) async {
+    await LogService.log('AppController.addProject: rawName="$rawName"');
     final name = rawName.trim();
     if (name.isEmpty) {
       throw const AppException('Escribe un nombre de proyecto.');
@@ -1117,14 +1223,18 @@ class AppController extends ChangeNotifier {
     if (exists) {
       throw const AppException('Ya existe un proyecto con ese nombre.');
     }
-    projects.add(
-      Project.create(
-        name,
-        color: projectColors[projects.length % projectColors.length],
-      ),
+    final newProject = Project.create(
+      name,
+      color: projectColors[projects.length % projectColors.length],
     );
+    await LogService.log(
+      'AppController.addProject: creado id=${newProject.id} color=${newProject.color}',
+    );
+    projects.add(newProject);
     notifyListeners();
+    await LogService.log('AppController.addProject: notifyListeners() emitido');
     await _save();
+    await LogService.log('AppController.addProject: _save() completado');
   }
 
   Future<void> renameProject(String id, String rawName) async {
