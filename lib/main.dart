@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -207,28 +208,192 @@ class _AppShellState extends State<AppShell> {
   }
 }
 
-class RegisterPage extends StatefulWidget {
+class RegisterPage extends StatelessWidget {
   const RegisterPage({super.key});
 
+  Future<void> _openNewActivitySheet(
+    BuildContext context,
+    AppController app,
+  ) async {
+    if (app.activeProjects.isEmpty) {
+      _showMessage(context, 'Da de alta un proyecto activo primero.');
+      return;
+    }
+
+    final started = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => _NewActivitySheet(app: app),
+    );
+
+    if (started == true &&
+        context.mounted &&
+        !isSameDay(app.selectedDay, DateTime.now())) {
+      app.selectDay(DateTime.now());
+    }
+  }
+
   @override
-  State<RegisterPage> createState() => _RegisterPageState();
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+
+    return AnimatedBuilder(
+      animation: app,
+      builder: (context, _) {
+        final activities = app.activitiesForDay(app.selectedDay);
+
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          children: [
+            DaySelector(value: app.selectedDay, onChanged: app.selectDay),
+            const SizedBox(height: 12),
+            if (app.runningActivity != null)
+              ActiveActivityPanel(activity: app.runningActivity!)
+            else
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Iniciar actividad'),
+                  onPressed: () => _openNewActivitySheet(context, app),
+                ),
+              ),
+            const SizedBox(height: 20),
+            Text(
+              'Actividades ${formatDate(app.selectedDay)}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            if (activities.isEmpty)
+              const EmptyState(
+                icon: Icons.event_available_outlined,
+                title: 'Sin actividades',
+                subtitle: 'El dia seleccionado no tiene registros.',
+              )
+            else
+              for (final activity in activities)
+                ActivityTile(
+                  activity: activity,
+                  project: app.projectById(activity.projectId),
+                ),
+          ],
+        );
+      },
+    );
+  }
 }
 
-class _RegisterPageState extends State<RegisterPage> {
+class ActiveActivityPanel extends StatelessWidget {
+  const ActiveActivityPanel({required this.activity, super.key});
+
+  final ActivityEntry activity;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    final project = app.projectById(activity.projectId);
+    final elapsed = activity.effectiveDuration;
+    // Anillo calibrado a 1 hora = 100%; se satura si la actividad dura mas.
+    final progress = (elapsed.inSeconds / 3600).clamp(0.0, 1.0);
+    final projectColor = Color(project.color);
+
+    return Card(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            SizedBox(
+              width: 160,
+              height: 160,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox.expand(
+                    child: CircularProgressIndicator(
+                      value: progress,
+                      strokeWidth: 12,
+                      strokeCap: StrokeCap.round,
+                      backgroundColor: Theme.of(context).colorScheme.surface,
+                      valueColor: AlwaysStoppedAnimation(projectColor),
+                    ),
+                  ),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        humanDurationLabel(elapsed),
+                        style: Theme.of(context).textTheme.headlineSmall
+                            ?.copyWith(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Tiempo total',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: ProjectName(project: project)),
+                Text(
+                  durationLabel(elapsed),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              activity.description,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.tonalIcon(
+                icon: const Icon(Icons.stop),
+                label: const Text('Detener'),
+                onPressed: () async {
+                  await app.stopActivity(activity.id);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NewActivitySheet extends StatefulWidget {
+  const _NewActivitySheet({required this.app});
+
+  final AppController app;
+
+  @override
+  State<_NewActivitySheet> createState() => _NewActivitySheetState();
+}
+
+class _NewActivitySheetState extends State<_NewActivitySheet> {
   final descriptionController = TextEditingController();
   final speech = SpeechToText();
-  String? selectedProjectId;
+  late String? selectedProjectId;
   bool speechReady = false;
   bool speechBusy = false;
+  bool submitting = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final app = AppScope.of(context);
-      selectedProjectId = app.activeProjects.firstOrNull?.id;
-      setState(() {});
-    });
+    selectedProjectId = widget.app.activeProjects.firstOrNull?.id;
   }
 
   @override
@@ -282,24 +447,25 @@ class _RegisterPageState extends State<RegisterPage> {
     );
   }
 
-  Future<void> _startActivity(AppController app) async {
+  Future<void> _submit() async {
     final projectId = selectedProjectId;
     if (projectId == null) {
-      _showMessage(context, 'Da de alta un proyecto activo primero.');
+      _showMessage(context, 'Selecciona un proyecto.');
       return;
     }
 
+    setState(() => submitting = true);
     try {
-      await app.startActivity(
+      await widget.app.startActivity(
         projectId: projectId,
         description: descriptionController.text,
       );
-      descriptionController.clear();
-      if (!isSameDay(app.selectedDay, DateTime.now())) {
-        app.selectDay(DateTime.now());
+      if (mounted) {
+        Navigator.of(context).pop(true);
       }
     } on AppException catch (error) {
       if (mounted) {
+        setState(() => submitting = false);
         _showMessage(context, error.message);
       }
     }
@@ -307,147 +473,135 @@ class _RegisterPageState extends State<RegisterPage> {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context);
+    final activeProjects = widget.app.activeProjects;
 
-    return AnimatedBuilder(
-      animation: app,
-      builder: (context, _) {
-        final activities = app.activitiesForDay(app.selectedDay);
-        final activeProjects = app.activeProjects;
-        final selectedStillActive = activeProjects.any(
-          (project) => project.id == selectedProjectId,
-        );
-        if (!selectedStillActive) {
-          selectedProjectId = activeProjects.firstOrNull?.id;
-        }
-
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-          children: [
-            DaySelector(value: app.selectedDay, onChanged: app.selectDay),
-            const SizedBox(height: 12),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    DropdownButtonFormField<String>(
-                      initialValue: selectedProjectId,
-                      items: [
-                        for (final project in activeProjects)
-                          DropdownMenuItem(
-                            value: project.id,
-                            child: ProjectName(project: project),
-                          ),
-                      ],
-                      onChanged: (value) {
-                        setState(() => selectedProjectId = value);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'Proyecto',
-                        prefixIcon: Icon(Icons.work_outline),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: descriptionController,
-                      minLines: 2,
-                      maxLines: 4,
-                      textInputAction: TextInputAction.done,
-                      decoration: InputDecoration(
-                        labelText: 'Actividad',
-                        hintText: 'Describe lo que estas haciendo',
-                        prefixIcon: const Icon(Icons.edit_note),
-                        suffixIcon: IconButton(
-                          tooltip: speechBusy ? 'Detener voz' : 'Dictar voz',
-                          icon: Icon(
-                            speechBusy ? Icons.mic : Icons.mic_none_outlined,
-                          ),
-                          onPressed: _toggleSpeech,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    FilledButton.icon(
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('Iniciar'),
-                      onPressed: app.runningActivity == null
-                          ? () => _startActivity(app)
-                          : null,
-                    ),
-                  ],
-                ),
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        12,
+        20,
+        MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.outlineVariant,
+                borderRadius: BorderRadius.circular(999),
               ),
             ),
-            if (app.runningActivity != null) ...[
-              const SizedBox(height: 12),
-              ActiveActivityPanel(activity: app.runningActivity!),
-            ],
-            const SizedBox(height: 20),
-            Text(
-              'Actividades ${formatDate(app.selectedDay)}',
-              style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Nueva actividad',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: descriptionController,
+            autofocus: true,
+            minLines: 2,
+            maxLines: 4,
+            textInputAction: TextInputAction.done,
+            decoration: InputDecoration(
+              labelText: 'Actividad',
+              hintText: 'Describe lo que estas haciendo',
+              prefixIcon: const Icon(Icons.edit_note),
+              suffixIcon: IconButton(
+                tooltip: speechBusy ? 'Detener voz' : 'Dictar voz',
+                icon: Icon(
+                  speechBusy ? Icons.mic : Icons.mic_none_outlined,
+                ),
+                onPressed: _toggleSpeech,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text('Proyecto', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          for (final project in activeProjects) ...[
+            _ProjectBadgeOption(
+              project: project,
+              selected: project.id == selectedProjectId,
+              onTap: () => setState(() => selectedProjectId = project.id),
             ),
             const SizedBox(height: 8),
-            if (activities.isEmpty)
-              const EmptyState(
-                icon: Icons.event_available_outlined,
-                title: 'Sin actividades',
-                subtitle: 'El dia seleccionado no tiene registros.',
-              )
-            else
-              for (final activity in activities)
-                ActivityTile(
-                  activity: activity,
-                  project: app.projectById(activity.projectId),
-                ),
           ],
-        );
-      },
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: submitting
+                      ? null
+                      : () => Navigator.of(context).pop(false),
+                  child: const Text('Cancelar'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Guardar'),
+                  onPressed: submitting ? null : _submit,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
 
-class ActiveActivityPanel extends StatelessWidget {
-  const ActiveActivityPanel({required this.activity, super.key});
+class _ProjectBadgeOption extends StatelessWidget {
+  const _ProjectBadgeOption({
+    required this.project,
+    required this.selected,
+    required this.onTap,
+  });
 
-  final ActivityEntry activity;
+  final Project project;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context);
-    final project = app.projectById(activity.projectId);
+    final scheme = Theme.of(context).colorScheme;
 
-    return Card(
-      color: Theme.of(context).colorScheme.secondaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: selected
+              ? scheme.primaryContainer
+              : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: selected ? scheme.primary : Colors.transparent,
+            width: 1.5,
+          ),
+        ),
+        child: Row(
           children: [
-            Row(
-              children: [
-                Expanded(child: ProjectName(project: project)),
-                Text(durationLabel(activity.effectiveDuration)),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              activity.description,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.tonalIcon(
-                icon: const Icon(Icons.stop),
-                label: const Text('Detener'),
-                onPressed: () async {
-                  await app.stopActivity(activity.id);
-                },
+            ColorDot(color: Color(project.color)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                project.name,
+                style: Theme.of(context).textTheme.bodyLarge,
               ),
             ),
+            if (selected) Icon(Icons.check_circle, color: scheme.primary),
           ],
         ),
       ),
@@ -594,12 +748,15 @@ class _ProjectsPageState extends State<ProjectsPage> {
         '_showProjectDialog: abriendo (project=${project?.id ?? "nuevo"})',
       ),
     );
-    final result = await showDialog<String>(
+    final result = await showDialog<({String name, int color})>(
       context: context,
       builder: (context) {
         return _ProjectNameDialog(
           initialName: project?.name ?? '',
           isRename: project != null,
+          initialColor:
+              project?.color ??
+              projectColors[app.projects.length % projectColors.length],
         );
       },
     );
@@ -612,14 +769,16 @@ class _ProjectsPageState extends State<ProjectsPage> {
 
     try {
       if (project == null) {
-        await LogService.log('_showProjectDialog: llamando addProject("$result")');
-        await app.addProject(result);
+        await LogService.log(
+          '_showProjectDialog: llamando addProject("${result.name}")',
+        );
+        await app.addProject(result.name, color: result.color);
         await LogService.log('_showProjectDialog: addProject OK');
       } else {
         await LogService.log(
-          '_showProjectDialog: llamando renameProject(${project.id}, "$result")',
+          '_showProjectDialog: llamando renameProject(${project.id}, "${result.name}")',
         );
-        await app.renameProject(project.id, result);
+        await app.renameProject(project.id, result.name, color: result.color);
         await LogService.log('_showProjectDialog: renameProject OK');
       }
     } on AppException catch (error) {
@@ -637,10 +796,15 @@ class _ProjectsPageState extends State<ProjectsPage> {
 }
 
 class _ProjectNameDialog extends StatefulWidget {
-  const _ProjectNameDialog({required this.initialName, required this.isRename});
+  const _ProjectNameDialog({
+    required this.initialName,
+    required this.isRename,
+    required this.initialColor,
+  });
 
   final String initialName;
   final bool isRename;
+  final int initialColor;
 
   @override
   State<_ProjectNameDialog> createState() => _ProjectNameDialogState();
@@ -648,11 +812,13 @@ class _ProjectNameDialog extends StatefulWidget {
 
 class _ProjectNameDialogState extends State<_ProjectNameDialog> {
   late final TextEditingController _controller;
+  late int _selectedColor;
 
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initialName);
+    _selectedColor = widget.initialColor;
   }
 
   @override
@@ -661,19 +827,46 @@ class _ProjectNameDialogState extends State<_ProjectNameDialog> {
     super.dispose();
   }
 
+  void _pop(String name) {
+    Navigator.of(context).pop((name: name, color: _selectedColor));
+  }
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
       title: Text(widget.isRename ? 'Renombrar' : 'Alta de proyecto'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        decoration: const InputDecoration(
-          labelText: 'Nombre',
-          prefixIcon: Icon(Icons.folder_outlined),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              decoration: const InputDecoration(
+                labelText: 'Nombre',
+                prefixIcon: Icon(Icons.folder_outlined),
+              ),
+              textCapitalization: TextCapitalization.sentences,
+              onSubmitted: _pop,
+            ),
+            const SizedBox(height: 16),
+            Text('Color', style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final color in projectColors)
+                  _ColorSwatch(
+                    color: Color(color),
+                    selected: color == _selectedColor,
+                    onTap: () => setState(() => _selectedColor = color),
+                  ),
+              ],
+            ),
+          ],
         ),
-        textCapitalization: TextCapitalization.sentences,
-        onSubmitted: (value) => Navigator.of(context).pop(value),
       ),
       actions: [
         TextButton(
@@ -681,10 +874,47 @@ class _ProjectNameDialogState extends State<_ProjectNameDialog> {
           child: const Text('Cancelar'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
+          onPressed: () => _pop(_controller.text),
           child: const Text('Guardar'),
         ),
       ],
+    );
+  }
+}
+
+class _ColorSwatch extends StatelessWidget {
+  const _ColorSwatch({
+    required this.color,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(999),
+      onTap: onTap,
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected
+                ? Theme.of(context).colorScheme.onSurface
+                : Colors.transparent,
+            width: 2.5,
+          ),
+        ),
+        child: selected
+            ? const Icon(Icons.check, color: Colors.white, size: 18)
+            : null,
+      ),
     );
   }
 }
@@ -707,6 +937,11 @@ class ReportsPage extends StatelessWidget {
         final totalDuration = activities.fold<Duration>(
           Duration.zero,
           (value, activity) => value + activity.effectiveDuration,
+        );
+        final dailyTotals = dailyDurations(
+          activities,
+          app.reportStart,
+          app.reportEnd,
         );
 
         return ListView(
@@ -781,27 +1016,27 @@ class ReportsPage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 20),
-            Text(
-              'Resumen por proyecto',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            if (totals.isEmpty)
+            if (activities.isEmpty)
               const EmptyState(
                 icon: Icons.query_stats_outlined,
                 title: 'Sin datos',
                 subtitle: 'El rango seleccionado no tiene actividades.',
               )
-            else
-              for (final item in totals.entries)
-                Card(
-                  child: ListTile(
-                    leading: ColorDot(color: Color(item.key.color)),
-                    title: Text(item.key.name),
-                    subtitle: Text('${item.value.count} actividades'),
-                    trailing: Text(compactDurationLabel(item.value.duration)),
-                  ),
-                ),
+            else ...[
+              Text(
+                'Horas por dia',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              DailyHoursChart(dailyTotals: dailyTotals),
+              const SizedBox(height: 20),
+              Text(
+                'Por proyecto',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              ProjectBreakdownChart(totals: totals),
+            ],
             const SizedBox(height: 20),
             Text('Detalle', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
@@ -813,6 +1048,170 @@ class ReportsPage extends StatelessWidget {
           ],
         );
       },
+    );
+  }
+}
+
+class DailyHoursChart extends StatelessWidget {
+  const DailyHoursChart({required this.dailyTotals, super.key});
+
+  final List<MapEntry<DateTime, Duration>> dailyTotals;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final maxHours = dailyTotals.fold<double>(
+      0,
+      (value, entry) => value > entry.value.inSeconds / 3600
+          ? value
+          : entry.value.inSeconds / 3600,
+    );
+    final chartMax = maxHours <= 0 ? 1.0 : maxHours * 1.25;
+    final interval = chartMax / 4;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 16, 20, 8),
+        child: SizedBox(
+          height: 200,
+          child: BarChart(
+            BarChartData(
+              maxY: chartMax,
+              gridData: FlGridData(
+                drawVerticalLine: false,
+                horizontalInterval: interval,
+                getDrawingHorizontalLine: (_) =>
+                    FlLine(color: scheme.outlineVariant, strokeWidth: 1),
+              ),
+              borderData: FlBorderData(show: false),
+              titlesData: FlTitlesData(
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 32,
+                    interval: interval == 0 ? 1 : interval,
+                    getTitlesWidget: (value, meta) => Text(
+                      value.toStringAsFixed(1),
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ),
+                ),
+                rightTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                topTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    getTitlesWidget: (value, meta) {
+                      final index = value.toInt();
+                      if (index < 0 || index >= dailyTotals.length) {
+                        return const SizedBox.shrink();
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          dayShortLabel(dailyTotals[index].key),
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              barGroups: [
+                for (var i = 0; i < dailyTotals.length; i++)
+                  BarChartGroupData(
+                    x: i,
+                    barRods: [
+                      BarChartRodData(
+                        toY: dailyTotals[i].value.inSeconds / 3600,
+                        color: isSameDay(dailyTotals[i].key, DateTime.now())
+                            ? scheme.primary
+                            : scheme.primary.withValues(alpha: 0.5),
+                        width: 18,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ProjectBreakdownChart extends StatelessWidget {
+  const ProjectBreakdownChart({required this.totals, super.key});
+
+  final Map<Project, ProjectTotal> totals;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = totals.entries.toList()
+      ..sort((a, b) => b.value.duration.compareTo(a.value.duration));
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 120,
+              height: 120,
+              child: PieChart(
+                PieChartData(
+                  centerSpaceRadius: 34,
+                  sectionsSpace: 2,
+                  sections: [
+                    for (final entry in entries)
+                      PieChartSectionData(
+                        value: entry.value.duration.inSeconds.toDouble(),
+                        color: Color(entry.key.color),
+                        radius: 24,
+                        showTitle: false,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 20),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final entry in entries)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          ColorDot(color: Color(entry.key.color)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              entry.key.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text(
+                            compactDurationLabel(entry.value.duration),
+                            style: Theme.of(context).textTheme.labelMedium,
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -1211,7 +1610,7 @@ class AppController extends ChangeNotifier {
     return mapped;
   }
 
-  Future<void> addProject(String rawName) async {
+  Future<void> addProject(String rawName, {int? color}) async {
     await LogService.log('AppController.addProject: rawName="$rawName"');
     final name = rawName.trim();
     if (name.isEmpty) {
@@ -1225,7 +1624,7 @@ class AppController extends ChangeNotifier {
     }
     final newProject = Project.create(
       name,
-      color: projectColors[projects.length % projectColors.length],
+      color: color ?? projectColors[projects.length % projectColors.length],
     );
     await LogService.log(
       'AppController.addProject: creado id=${newProject.id} color=${newProject.color}',
@@ -1237,7 +1636,7 @@ class AppController extends ChangeNotifier {
     await LogService.log('AppController.addProject: _save() completado');
   }
 
-  Future<void> renameProject(String id, String rawName) async {
+  Future<void> renameProject(String id, String rawName, {int? color}) async {
     final name = rawName.trim();
     if (name.isEmpty) {
       throw const AppException('Escribe un nombre de proyecto.');
@@ -1253,7 +1652,7 @@ class AppController extends ChangeNotifier {
     if (index == -1) {
       return;
     }
-    projects[index] = projects[index].copyWith(name: name);
+    projects[index] = projects[index].copyWith(name: name, color: color);
     notifyListeners();
     await _save();
   }
@@ -1473,7 +1872,10 @@ class ExportService {
       );
     }
 
-    await file.writeAsString(buffer.toString(), encoding: utf8);
+    // El BOM UTF-8 hace que Excel detecte la codificacion correcta en vez
+    // de asumir la codificacion ANSI del sistema, que rompe acentos y enies.
+    const utf8Bom = '﻿';
+    await file.writeAsString('$utf8Bom${buffer.toString()}', encoding: utf8);
     return file;
   }
 }
@@ -1731,6 +2133,58 @@ String compactDurationLabel(Duration duration) {
     return '${minutes}m';
   }
   return '${hours}h ${minutes}m';
+}
+
+List<MapEntry<DateTime, Duration>> dailyDurations(
+  List<ActivityEntry> activities,
+  DateTime start,
+  DateTime end,
+) {
+  final byDay = <String, Duration>{};
+  for (final activity in activities) {
+    final key = dateKey(activity.startAt);
+    byDay[key] = (byDay[key] ?? Duration.zero) + activity.effectiveDuration;
+  }
+
+  final days = <DateTime>[];
+  var cursor = dayOnly(start);
+  final last = dayOnly(end);
+  while (!cursor.isAfter(last)) {
+    days.add(cursor);
+    cursor = cursor.add(const Duration(days: 1));
+  }
+
+  return [
+    for (final day in days) MapEntry(day, byDay[dateKey(day)] ?? Duration.zero),
+  ];
+}
+
+const _weekdayShortNames = ['', 'lun', 'mar', 'mie', 'jue', 'vie', 'sab', 'dom'];
+
+String dayShortLabel(DateTime day) {
+  final now = DateTime.now();
+  if (isSameDay(day, now)) {
+    return 'Hoy';
+  }
+  if (isSameDay(day, now.subtract(const Duration(days: 1)))) {
+    return 'Ayer';
+  }
+  return _weekdayShortNames[day.weekday];
+}
+
+String humanDurationLabel(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60);
+  final seconds = duration.inSeconds.remainder(60);
+  final parts = <String>[];
+  if (hours > 0) {
+    parts.add('${hours}h');
+  }
+  if (hours > 0 || minutes > 0) {
+    parts.add('${minutes}m');
+  }
+  parts.add('${seconds}s');
+  return parts.join(' ');
 }
 
 String csvCell(String value) {
