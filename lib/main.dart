@@ -4,17 +4,25 @@ import 'dart:io';
 import 'package:excel/excel.dart' as xlsx;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:workmanager/workmanager.dart';
 
+import 'background/daily_report_task.dart';
 import 'models/proyecto_dto.dart';
 import 'models/registro_hora_dto.dart';
-import 'services/log_service.dart';
+import 'services/email_service.dart';
+import 'services/email_settings_service.dart';
 import 'services/local_storage_service.dart';
+import 'services/log_service.dart';
+import 'services/notification_service.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.presentError(details);
     unawaited(
@@ -25,6 +33,7 @@ void main() {
       ),
     );
   };
+  unawaited(Workmanager().initialize(dailyReportCallbackDispatcher));
   runZonedGuarded(() => runApp(const MetricHoursApp()), (error, stack) {
     unawaited(LogService.log('=== Uncaught zone error ===\n$error\n$stack'));
   });
@@ -43,7 +52,11 @@ class _MetricHoursAppState extends State<MetricHoursApp> {
   @override
   void initState() {
     super.initState();
-    controller = AppController(LocalStorageService(), ExportService());
+    controller = AppController(
+      LocalStorageService(),
+      ExportService(),
+      NotificationService(),
+    );
     // La carga del almacenamiento del dispositivo arranca cuando el usuario
     // elige "Usar en local" en WelcomeScreen.
   }
@@ -56,32 +69,44 @@ class _MetricHoursAppState extends State<MetricHoursApp> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF006A60),
-      brightness: Brightness.light,
-    );
-
     return AppScope(
       controller: controller,
-      child: MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Metric Hours',
-        theme: ThemeData(
-          colorScheme: scheme,
-          useMaterial3: true,
-          scaffoldBackgroundColor: const Color(0xFFF7F8F4),
-          inputDecorationTheme: const InputDecorationTheme(
-            border: OutlineInputBorder(),
-          ),
-          cardTheme: CardThemeData(
-            elevation: 0,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-              side: BorderSide(color: scheme.outlineVariant),
-            ),
-          ),
+      child: AnimatedBuilder(
+        animation: controller,
+        builder: (context, _) {
+          return MaterialApp(
+            debugShowCheckedModeBanner: false,
+            title: 'Metric Hours',
+            themeMode: controller.themeMode,
+            theme: _buildTheme(Brightness.light),
+            darkTheme: _buildTheme(Brightness.dark),
+            home: const WelcomeScreen(),
+          );
+        },
+      ),
+    );
+  }
+
+  ThemeData _buildTheme(Brightness brightness) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF006A60),
+      brightness: brightness,
+    );
+    return ThemeData(
+      colorScheme: scheme,
+      useMaterial3: true,
+      scaffoldBackgroundColor: brightness == Brightness.light
+          ? const Color(0xFFF7F8F4)
+          : null,
+      inputDecorationTheme: const InputDecorationTheme(
+        border: OutlineInputBorder(),
+      ),
+      cardTheme: CardThemeData(
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: scheme.outlineVariant),
         ),
-        home: const WelcomeScreen(),
       ),
     );
   }
@@ -185,8 +210,9 @@ class _AppShellState extends State<AppShell> {
       const RegisterPage(),
       const ProjectsPage(),
       const ReportsPage(),
+      const SettingsPage(),
     ];
-    final titles = ['Registro', 'Proyectos', 'Informes'];
+    final titles = ['Registro', 'Proyectos', 'Informes', 'Ajustes'];
 
     return AnimatedBuilder(
       animation: app,
@@ -198,17 +224,7 @@ class _AppShellState extends State<AppShell> {
         }
 
         return Scaffold(
-          appBar: AppBar(
-            title: Text(titles[selectedIndex]),
-            actions: [
-              Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: Center(
-                  child: RunningBadge(activity: app.runningActivity),
-                ),
-              ),
-            ],
-          ),
+          appBar: AppBar(title: Text(titles[selectedIndex])),
           body: SafeArea(child: pages[selectedIndex]),
           bottomNavigationBar: NavigationBar(
             selectedIndex: selectedIndex,
@@ -231,10 +247,427 @@ class _AppShellState extends State<AppShell> {
                 selectedIcon: Icon(Icons.table_chart),
                 label: 'Informes',
               ),
+              NavigationDestination(
+                icon: Icon(Icons.settings_outlined),
+                selectedIcon: Icon(Icons.settings),
+                label: 'Ajustes',
+              ),
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  PackageInfo? packageInfo;
+
+  final _emailSettingsService = EmailSettingsService(LocalStorageService());
+  final _emailService = EmailService();
+
+  bool _loadingEmailSettings = true;
+  bool _savingEmailSettings = false;
+  bool _sendingTestEmail = false;
+
+  bool _emailEnabled = false;
+  TimeOfDay _emailTime = const TimeOfDay(hour: 23, minute: 0);
+  final _toEmailController = TextEditingController();
+  final _fromEmailController = TextEditingController();
+  final _hostController = TextEditingController();
+  final _portController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPackageInfo());
+    unawaited(_loadEmailSettings());
+  }
+
+  @override
+  void dispose() {
+    _toEmailController.dispose();
+    _fromEmailController.dispose();
+    _hostController.dispose();
+    _portController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadPackageInfo() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) {
+      setState(() => packageInfo = info);
+    }
+  }
+
+  Future<void> _loadEmailSettings() async {
+    final settings = await _emailSettingsService.load();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _emailEnabled = settings.enabled;
+      _emailTime = TimeOfDay(hour: settings.hour, minute: settings.minute);
+      _toEmailController.text = settings.toEmail;
+      _fromEmailController.text = settings.fromEmail;
+      _hostController.text = settings.smtpHost;
+      _portController.text = settings.smtpPort.toString();
+      _usernameController.text = settings.smtpUsername;
+      _passwordController.text = settings.smtpPassword;
+      _loadingEmailSettings = false;
+    });
+  }
+
+  EmailSettings _currentEmailSettings() {
+    return EmailSettings(
+      enabled: _emailEnabled,
+      hour: _emailTime.hour,
+      minute: _emailTime.minute,
+      toEmail: _toEmailController.text.trim(),
+      fromEmail: _fromEmailController.text.trim(),
+      smtpHost: _hostController.text.trim(),
+      smtpPort: int.tryParse(_portController.text.trim()) ?? 587,
+      smtpUsername: _usernameController.text.trim(),
+      smtpPassword: _passwordController.text,
+    );
+  }
+
+  Future<void> _pickEmailTime() async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _emailTime,
+    );
+    if (picked != null) {
+      setState(() => _emailTime = picked);
+    }
+  }
+
+  Future<void> _saveEmailSettings() async {
+    setState(() => _savingEmailSettings = true);
+    final settings = _currentEmailSettings();
+    await _emailSettingsService.save(settings);
+    await scheduleNextDailyReport();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _savingEmailSettings = false);
+    _showMessage(
+      context,
+      settings.enabled
+          ? 'Guardado. Envio automatico programado para las '
+                '${_emailTime.format(context)}.'
+          : 'Guardado. Envio automatico desactivado.',
+    );
+  }
+
+  Future<void> _sendTestEmail(AppController app) async {
+    final settings = _currentEmailSettings();
+    if (!settings.isConfigured) {
+      _showMessage(
+        context,
+        'Completa remitente, SMTP y destino antes de probar.',
+      );
+      return;
+    }
+
+    setState(() => _sendingTestEmail = true);
+    try {
+      final today = dayOnly(DateTime.now());
+      final file = await app.exportService.writeXlsx(
+        entries: app.activitiesForDay(today),
+        projects: {for (final project in app.projects) project.id: project},
+        start: today,
+        end: today,
+      );
+      await _emailService.sendReport(
+        settings: settings,
+        attachment: file,
+        subject: 'Metric Hours - Correo de prueba',
+        body:
+            'Este es un correo de prueba de la configuracion SMTP de '
+            'Metric Hours.',
+      );
+      if (mounted) {
+        _showMessage(context, 'Correo de prueba enviado.');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showMessage(context, 'No se pudo enviar: $error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _sendingTestEmail = false);
+      }
+    }
+  }
+
+  Future<void> _optimizeBattery() async {
+    final status = await Permission.ignoreBatteryOptimizations.status;
+    if (status.isGranted) {
+      if (mounted) {
+        _showMessage(
+          context,
+          'La app ya esta excluida de la optimizacion de bateria.',
+        );
+      }
+      return;
+    }
+    await Permission.ignoreBatteryOptimizations.request();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      children: [
+        Text('Apariencia', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Tema',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<ThemeMode>(
+                  value: app.themeMode,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.palette_outlined),
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: ThemeMode.system,
+                      child: Row(
+                        children: [
+                          Icon(Icons.brightness_auto_outlined),
+                          SizedBox(width: 12),
+                          Text('Sistema'),
+                        ],
+                      ),
+                    ),
+                    DropdownMenuItem(
+                      value: ThemeMode.light,
+                      child: Row(
+                        children: [
+                          Icon(Icons.light_mode_outlined),
+                          SizedBox(width: 12),
+                          Text('Claro'),
+                        ],
+                      ),
+                    ),
+                    DropdownMenuItem(
+                      value: ThemeMode.dark,
+                      child: Row(
+                        children: [
+                          Icon(Icons.dark_mode_outlined),
+                          SizedBox(width: 12),
+                          Text('Oscuro'),
+                        ],
+                      ),
+                    ),
+                  ],
+                  onChanged: (mode) {
+                    if (mode != null) {
+                      app.setThemeMode(mode);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          'Reporte diario por correo',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: _loadingEmailSettings
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(),
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Envio automatico'),
+                        subtitle: const Text(
+                          'Genera y envia el reporte de hoy a la hora '
+                          'indicada, todos los dias.',
+                        ),
+                        value: _emailEnabled,
+                        onChanged: (value) =>
+                            setState(() => _emailEnabled = value),
+                      ),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.schedule_outlined),
+                        title: const Text('Hora de envio'),
+                        subtitle: Text(_emailTime.format(context)),
+                        trailing: const Icon(Icons.chevron_right),
+                        onTap: _pickEmailTime,
+                      ),
+                      const Divider(height: 24),
+                      TextField(
+                        controller: _toEmailController,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: const InputDecoration(
+                          labelText: 'Enviar a',
+                          prefixIcon: Icon(Icons.email_outlined),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Configuracion SMTP',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _fromEmailController,
+                        keyboardType: TextInputType.emailAddress,
+                        decoration: const InputDecoration(
+                          labelText: 'Remitente (from)',
+                          prefixIcon: Icon(Icons.mail_outline),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: TextField(
+                              controller: _hostController,
+                              decoration: const InputDecoration(
+                                labelText: 'Host SMTP',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: TextField(
+                              controller: _portController,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(
+                                labelText: 'Puerto',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _usernameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Usuario SMTP',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _passwordController,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Contrasena / API key',
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              icon: _sendingTestEmail
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.send_outlined),
+                              label: const Text('Enviar prueba'),
+                              onPressed: _sendingTestEmail
+                                  ? null
+                                  : () => _sendTestEmail(app),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.icon(
+                              icon: _savingEmailSettings
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.save_outlined),
+                              label: const Text('Guardar'),
+                              onPressed: _savingEmailSettings
+                                  ? null
+                                  : _saveEmailSettings,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.battery_saver_outlined),
+            title: const Text('Optimizar bateria'),
+            subtitle: const Text(
+              'Evita que el sistema detenga el envio automatico en '
+              'segundo plano.',
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _optimizeBattery,
+          ),
+        ),
+        const SizedBox(height: 20),
+        Text('Acerca de', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('Version'),
+            subtitle: Text(
+              packageInfo == null
+                  ? 'Cargando...'
+                  : 'v${packageInfo!.version} (build ${packageInfo!.buildNumber})',
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1455,37 +1888,6 @@ class ActivityTile extends StatelessWidget {
   }
 }
 
-class RunningBadge extends StatelessWidget {
-  const RunningBadge({required this.activity, super.key});
-
-  final ActivityEntry? activity;
-
-  @override
-  Widget build(BuildContext context) {
-    if (activity == null) {
-      return const SizedBox.shrink();
-    }
-
-    final isPaused = activity!.isPaused;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: isPaused
-            ? Theme.of(context).colorScheme.surfaceContainerHighest
-            : Theme.of(context).colorScheme.primaryContainer,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        children: [
-          Icon(isPaused ? Icons.pause : Icons.circle, size: 10),
-          const SizedBox(width: 6),
-          Text(compactDurationLabel(activity!.effectiveDuration)),
-        ],
-      ),
-    );
-  }
-}
-
 class SummaryMetric extends StatelessWidget {
   const SummaryMetric({required this.label, required this.value, super.key});
 
@@ -1600,18 +2002,22 @@ class IconLabel extends StatelessWidget {
 }
 
 class AppController extends ChangeNotifier {
-  AppController(this.localStorage, this.exportService);
+  AppController(this.localStorage, this.exportService, this.notifications);
 
   final LocalStorageService localStorage;
   final ExportService exportService;
+  final NotificationService notifications;
   final List<Project> projects = [];
   final List<ActivityEntry> activities = [];
   DateTime selectedDay = dayOnly(DateTime.now());
   DateTime reportStart = startOfWeek(DateTime.now());
   DateTime reportEnd = endOfWeek(DateTime.now());
+  ThemeMode themeMode = ThemeMode.system;
   bool isLoaded = false;
   Timer? _ticker;
   Timer? _midnightTimer;
+
+  static const _themeModeSettingKey = 'themeMode';
 
   List<Project> get activeProjects =>
       projects.where((project) => project.isActive).toList();
@@ -1636,9 +2042,28 @@ class AppController extends ChangeNotifier {
         await addProject('Personal');
       }
 
+      final storedThemeMode = await localStorage.readSetting(
+        _themeModeSettingKey,
+      );
+      themeMode = ThemeMode.values.firstWhere(
+        (mode) => mode.name == storedThemeMode,
+        orElse: () => ThemeMode.system,
+      );
+
       selectedDay = dayOnly(DateTime.now());
       reportStart = startOfWeek(selectedDay);
       reportEnd = endOfWeek(selectedDay);
+
+      await notifications.initialize();
+      final active = runningActivity;
+      if (active != null) {
+        await _syncNotification(active);
+      }
+
+      // Red de seguridad: si por lo que sea la cadena de reprogramacion del
+      // envio diario se corto (por ejemplo la tarea nunca llego a correr),
+      // reestablecerla cada vez que se abre la app.
+      await scheduleNextDailyReport();
     } catch (error) {
       await LogService.log(
         'AppController.load: fallo cargando datos locales -> $error',
@@ -1666,6 +2091,15 @@ class AppController extends ChangeNotifier {
     }
     reportStart = normalizedStart;
     reportEnd = normalizedEnd;
+    notifyListeners();
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    if (themeMode == mode) {
+      return;
+    }
+    themeMode = mode;
+    await localStorage.writeSetting(_themeModeSettingKey, mode.name);
     notifyListeners();
   }
 
@@ -1816,6 +2250,7 @@ class AppController extends ChangeNotifier {
     _upsertActivity(entry);
     selectedDay = dayOnly(DateTime.now());
     await localStorage.upsertActivity(entry.toDbRow());
+    await _syncNotification(entry);
     notifyListeners();
   }
 
@@ -1831,6 +2266,7 @@ class AppController extends ChangeNotifier {
     final updated = activity.copyWith(pausedAt: DateTime.now());
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
+    await _syncNotification(updated);
     notifyListeners();
   }
 
@@ -1852,6 +2288,7 @@ class AppController extends ChangeNotifier {
     );
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
+    await _syncNotification(updated);
     notifyListeners();
   }
 
@@ -1875,7 +2312,29 @@ class AppController extends ChangeNotifier {
     );
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
+    await notifications.cancel();
     notifyListeners();
+  }
+
+  /// Refleja el estado de [activity] en la notificacion de la barra de
+  /// Android: cronometro en vivo si esta corriendo, texto fijo si esta en
+  /// pausa.
+  Future<void> _syncNotification(ActivityEntry activity) async {
+    final project = projectById(activity.projectId);
+    if (activity.isPaused) {
+      await notifications.showStatic(
+        title: project.name,
+        body:
+            '${activity.description} · En pausa · '
+            '${shortDurationLabel(activity.effectiveDuration)}',
+      );
+    } else {
+      await notifications.showRunning(
+        title: project.name,
+        body: activity.description,
+        effectiveStart: DateTime.now().subtract(activity.effectiveDuration),
+      );
+    }
   }
 
   Future<File> exportXlsx() async {
@@ -2297,6 +2756,17 @@ String compactDurationLabel(Duration duration) {
     return '${minutes}m';
   }
   return '${hours}h ${minutes}m';
+}
+
+/// Formato compacto "MM:SS" (o "H:MM:SS" si ya paso una hora).
+String shortDurationLabel(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  if (hours > 0) {
+    return '$hours:$minutes:$seconds';
+  }
+  return '$minutes:$seconds';
 }
 
 List<MapEntry<DateTime, Duration>> dailyDurations(

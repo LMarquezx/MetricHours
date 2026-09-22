@@ -8,7 +8,7 @@ import 'package:sqflite/sqflite.dart';
 /// del directorio de documentos que Android asigna a esta aplicacion.
 class LocalStorageService {
   static const _dbName = 'metric_hours.db';
-  static const _dbVersion = 1;
+  static const _dbVersion = 2;
 
   Database? _db;
 
@@ -45,6 +45,22 @@ class LocalStorageService {
             pausedAt TEXT
           )
         ''');
+        await db.execute('''
+          CREATE TABLE settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+          )
+        ''');
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            )
+          ''');
+        }
       },
     );
     _db = db;
@@ -77,5 +93,24 @@ class LocalStorageService {
       row,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<String?> readSetting(String key) async {
+    final db = await _database();
+    final rows = await db.query(
+      'settings',
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first['value'] as String?;
+  }
+
+  Future<void> writeSetting(String key, String value) async {
+    final db = await _database();
+    await db.insert('settings', {
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 }
