@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
+import 'package:excel/excel.dart' as xlsx;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -328,9 +328,11 @@ class ActiveActivityPanel extends StatelessWidget {
     final app = AppScope.of(context);
     final project = app.projectById(activity.projectId);
     final elapsed = activity.effectiveDuration;
+    final isPaused = activity.isPaused;
     // Anillo calibrado a 1 hora = 100%; se satura si la actividad dura mas.
     final progress = (elapsed.inSeconds / 3600).clamp(0.0, 1.0);
-    final projectColor = Color(project.color);
+    final scheme = Theme.of(context).colorScheme;
+    final projectColor = isPaused ? scheme.outline : Color(project.color);
 
     return Card(
       color: Theme.of(context).colorScheme.secondaryContainer,
@@ -363,7 +365,7 @@ class ActiveActivityPanel extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Tiempo total',
+                        isPaused ? 'En pausa' : 'Tiempo total',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
@@ -387,15 +389,32 @@ class ActiveActivityPanel extends StatelessWidget {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.tonalIcon(
-                icon: const Icon(Icons.stop),
-                label: const Text('Detener'),
-                onPressed: () async {
-                  await app.stopActivity(activity.id);
-                },
-              ),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: Icon(isPaused ? Icons.play_arrow : Icons.pause),
+                    label: Text(isPaused ? 'Reanudar' : 'Pausar'),
+                    onPressed: () async {
+                      if (isPaused) {
+                        await app.resumeActivity(activity.id);
+                      } else {
+                        await app.pauseActivity(activity.id);
+                      }
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Detener'),
+                    onPressed: () async {
+                      await app.stopActivity(activity.id);
+                    },
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -971,10 +990,10 @@ class ReportsPage extends StatelessWidget {
           Duration.zero,
           (value, activity) => value + activity.effectiveDuration,
         );
-        final dailyTotals = dailyDurations(
-          activities,
-          app.reportStart,
-          app.reportEnd,
+        final splits = dailySplits(activities, app.reportStart, app.reportEnd);
+        final overtimeDuration = splits.fold<Duration>(
+          Duration.zero,
+          (value, split) => value + split.overtime,
         );
 
         return ListView(
@@ -1022,6 +1041,13 @@ class ReportsPage extends StatelessWidget {
                             value: compactDurationLabel(totalDuration),
                           ),
                         ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: SummaryMetric(
+                            label: 'Horas extra',
+                            value: compactDurationLabel(overtimeDuration),
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -1029,11 +1055,11 @@ class ReportsPage extends StatelessWidget {
                       width: double.infinity,
                       child: FilledButton.icon(
                         icon: const Icon(Icons.ios_share),
-                        label: const Text('Exportar CSV'),
+                        label: const Text('Exportar Excel'),
                         onPressed: activities.isEmpty
                             ? null
                             : () async {
-                                final file = await app.exportCsv();
+                                final file = await app.exportXlsx();
                                 if (!context.mounted) {
                                   return;
                                 }
@@ -1061,7 +1087,7 @@ class ReportsPage extends StatelessWidget {
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 8),
-              DailyHoursChart(dailyTotals: dailyTotals),
+              DailyHoursChart(dailySplits: splits),
               const SizedBox(height: 20),
               Text(
                 'Por proyecto',
@@ -1086,18 +1112,18 @@ class ReportsPage extends StatelessWidget {
 }
 
 class DailyHoursChart extends StatelessWidget {
-  const DailyHoursChart({required this.dailyTotals, super.key});
+  const DailyHoursChart({required this.dailySplits, super.key});
 
-  final List<MapEntry<DateTime, Duration>> dailyTotals;
+  final List<DailySplit> dailySplits;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final maxHours = dailyTotals.fold<double>(
+    final maxHours = dailySplits.fold<double>(
       0,
-      (value, entry) => value > entry.value.inSeconds / 3600
+      (value, split) => value > split.total.inSeconds / 3600
           ? value
-          : entry.value.inSeconds / 3600,
+          : split.total.inSeconds / 3600,
     );
     final chartMax = maxHours <= 0 ? 1.0 : maxHours * 1.25;
     final interval = chartMax / 4;
@@ -1105,75 +1131,120 @@ class DailyHoursChart extends StatelessWidget {
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(12, 16, 20, 8),
-        child: SizedBox(
-          height: 200,
-          child: BarChart(
-            BarChartData(
-              maxY: chartMax,
-              gridData: FlGridData(
-                drawVerticalLine: false,
-                horizontalInterval: interval,
-                getDrawingHorizontalLine: (_) =>
-                    FlLine(color: scheme.outlineVariant, strokeWidth: 1),
-              ),
-              borderData: FlBorderData(show: false),
-              titlesData: FlTitlesData(
-                leftTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    reservedSize: 32,
-                    interval: interval == 0 ? 1 : interval,
-                    getTitlesWidget: (value, meta) => Text(
-                      value.toStringAsFixed(1),
-                      style: Theme.of(context).textTheme.labelSmall,
-                    ),
+        child: Column(
+          children: [
+            SizedBox(
+              height: 200,
+              child: BarChart(
+                BarChartData(
+                  maxY: chartMax,
+                  gridData: FlGridData(
+                    drawVerticalLine: false,
+                    horizontalInterval: interval,
+                    getDrawingHorizontalLine: (_) =>
+                        FlLine(color: scheme.outlineVariant, strokeWidth: 1),
                   ),
-                ),
-                rightTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-                topTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-                bottomTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    getTitlesWidget: (value, meta) {
-                      final index = value.toInt();
-                      if (index < 0 || index >= dailyTotals.length) {
-                        return const SizedBox.shrink();
-                      }
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(
-                          dayShortLabel(dailyTotals[index].key),
+                  borderData: FlBorderData(show: false),
+                  titlesData: FlTitlesData(
+                    leftTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 32,
+                        interval: interval == 0 ? 1 : interval,
+                        getTitlesWidget: (value, meta) => Text(
+                          value.toStringAsFixed(1),
                           style: Theme.of(context).textTheme.labelSmall,
                         ),
-                      );
-                    },
+                      ),
+                    ),
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        getTitlesWidget: (value, meta) {
+                          final index = value.toInt();
+                          if (index < 0 || index >= dailySplits.length) {
+                            return const SizedBox.shrink();
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              dayShortLabel(dailySplits[index].day),
+                              style: Theme.of(context).textTheme.labelSmall,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
                   ),
+                  barGroups: [
+                    for (var i = 0; i < dailySplits.length; i++)
+                      BarChartGroupData(
+                        x: i,
+                        barRods: [
+                          BarChartRodData(
+                            toY: dailySplits[i].total.inSeconds / 3600,
+                            width: 18,
+                            borderRadius: BorderRadius.circular(6),
+                            rodStackItems: [
+                              BarChartRodStackItem(
+                                0,
+                                dailySplits[i].regular.inSeconds / 3600,
+                                isSameDay(dailySplits[i].day, DateTime.now())
+                                    ? scheme.primary
+                                    : scheme.primary.withValues(alpha: 0.5),
+                              ),
+                              BarChartRodStackItem(
+                                dailySplits[i].regular.inSeconds / 3600,
+                                dailySplits[i].total.inSeconds / 3600,
+                                isSameDay(dailySplits[i].day, DateTime.now())
+                                    ? scheme.error
+                                    : scheme.error.withValues(alpha: 0.5),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                  ],
                 ),
               ),
-              barGroups: [
-                for (var i = 0; i < dailyTotals.length; i++)
-                  BarChartGroupData(
-                    x: i,
-                    barRods: [
-                      BarChartRodData(
-                        toY: dailyTotals[i].value.inSeconds / 3600,
-                        color: isSameDay(dailyTotals[i].key, DateTime.now())
-                            ? scheme.primary
-                            : scheme.primary.withValues(alpha: 0.5),
-                        width: 18,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                    ],
-                  ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 16,
+              runSpacing: 4,
+              children: [
+                _ChartLegendItem(color: scheme.primary, label: 'Horas normales'),
+                _ChartLegendItem(color: scheme.error, label: 'Horas extra'),
               ],
             ),
-          ),
+          ],
         ),
       ),
+    );
+  }
+}
+
+class _ChartLegendItem extends StatelessWidget {
+  const _ChartLegendItem({required this.color, required this.label});
+
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ColorDot(color: color),
+        const SizedBox(width: 6),
+        Text(label, style: Theme.of(context).textTheme.labelSmall),
+      ],
     );
   }
 }
@@ -1366,9 +1437,13 @@ class ActivityTile extends StatelessWidget {
                       '${formatDate(activity.startAt)} ${formatTime(activity.startAt)}',
                 ),
                 IconLabel(
-                  icon: activity.isRunning ? Icons.pending : Icons.logout,
+                  icon: activity.isPaused
+                      ? Icons.pause_circle_outline
+                      : activity.isRunning
+                      ? Icons.pending
+                      : Icons.logout,
                   text: activity.endAt == null
-                      ? 'En curso'
+                      ? (activity.isPaused ? 'En pausa' : 'En curso')
                       : formatTime(activity.endAt!),
                 ),
               ],
@@ -1391,15 +1466,18 @@ class RunningBadge extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
+    final isPaused = activity!.isPaused;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer,
+        color: isPaused
+            ? Theme.of(context).colorScheme.surfaceContainerHighest
+            : Theme.of(context).colorScheme.primaryContainer,
         borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
         children: [
-          const Icon(Icons.circle, size: 10),
+          Icon(isPaused ? Icons.pause : Icons.circle, size: 10),
           const SizedBox(width: 6),
           Text(compactDurationLabel(activity!.effectiveDuration)),
         ],
@@ -1529,8 +1607,8 @@ class AppController extends ChangeNotifier {
   final List<Project> projects = [];
   final List<ActivityEntry> activities = [];
   DateTime selectedDay = dayOnly(DateTime.now());
-  DateTime reportStart = dayOnly(DateTime.now());
-  DateTime reportEnd = dayOnly(DateTime.now());
+  DateTime reportStart = startOfWeek(DateTime.now());
+  DateTime reportEnd = endOfWeek(DateTime.now());
   bool isLoaded = false;
   Timer? _ticker;
   Timer? _midnightTimer;
@@ -1544,29 +1622,23 @@ class AppController extends ChangeNotifier {
   /// Carga los datos que se guardaron previamente en este dispositivo.
   Future<void> load() async {
     try {
-      final data = await localStorage.read();
-      final storedProjects = (data['projects'] as List<dynamic>? ?? const [])
-          .whereType<Map<String, dynamic>>()
-          .map(Project.fromLocalJson);
+      final storedProjects = await localStorage.readProjects();
       projects
         ..clear()
-        ..addAll(storedProjects);
+        ..addAll(storedProjects.map(Project.fromDbRow));
 
-      final storedActivities =
-          (data['activities'] as List<dynamic>? ?? const [])
-              .whereType<Map<String, dynamic>>()
-              .map(ActivityEntry.fromLocalJson);
+      final storedActivities = await localStorage.readActivities();
       activities
         ..clear()
-        ..addAll(storedActivities);
+        ..addAll(storedActivities.map(ActivityEntry.fromDbRow));
 
       if (projects.isEmpty) {
         await addProject('Personal');
       }
 
       selectedDay = dayOnly(DateTime.now());
-      reportStart = selectedDay;
-      reportEnd = selectedDay;
+      reportStart = startOfWeek(selectedDay);
+      reportEnd = endOfWeek(selectedDay);
     } catch (error) {
       await LogService.log(
         'AppController.load: fallo cargando datos locales -> $error',
@@ -1665,16 +1737,15 @@ class AppController extends ChangeNotifier {
     }
     final chosenColor =
         color ?? projectColors[projects.length % projectColors.length];
-    projects.add(
-      Project(
-        id: _newId(),
-        name: name,
-        color: chosenColor,
-        isActive: true,
-        createdAt: DateTime.now(),
-      ),
+    final project = Project(
+      id: _newId(),
+      name: name,
+      color: chosenColor,
+      isActive: true,
+      createdAt: DateTime.now(),
     );
-    await _save();
+    projects.add(project);
+    await localStorage.upsertProject(project.toDbRow());
     notifyListeners();
   }
 
@@ -1685,13 +1756,15 @@ class AppController extends ChangeNotifier {
     }
     final current = projectById(id);
     final index = projects.indexWhere((project) => project.id == id);
-    if (index != -1) {
-      projects[index] = current.copyWith(
-        name: name,
-        color: color ?? current.color,
-      );
+    if (index == -1) {
+      return;
     }
-    await _save();
+    final updated = current.copyWith(
+      name: name,
+      color: color ?? current.color,
+    );
+    projects[index] = updated;
+    await localStorage.upsertProject(updated.toDbRow());
     notifyListeners();
   }
 
@@ -1703,14 +1776,16 @@ class AppController extends ChangeNotifier {
     }
 
     final index = projects.indexWhere((project) => project.id == id);
-    if (index != -1) {
-      projects[index] = projects[index].copyWith(
-        isActive: isActive,
-        archivedAt: isActive ? null : DateTime.now(),
-        clearArchivedAt: isActive,
-      );
+    if (index == -1) {
+      return;
     }
-    await _save();
+    final updated = projects[index].copyWith(
+      isActive: isActive,
+      archivedAt: isActive ? null : DateTime.now(),
+      clearArchivedAt: isActive,
+    );
+    projects[index] = updated;
+    await localStorage.upsertProject(updated.toDbRow());
     notifyListeners();
   }
 
@@ -1732,16 +1807,51 @@ class AppController extends ChangeNotifier {
       );
     }
 
-    _upsertActivity(
-      ActivityEntry(
-        id: _newId(),
-        projectId: projectId,
-        description: cleanDescription,
-        startAt: DateTime.now(),
-      ),
+    final entry = ActivityEntry(
+      id: _newId(),
+      projectId: projectId,
+      description: cleanDescription,
+      startAt: DateTime.now(),
     );
+    _upsertActivity(entry);
     selectedDay = dayOnly(DateTime.now());
-    await _save();
+    await localStorage.upsertActivity(entry.toDbRow());
+    notifyListeners();
+  }
+
+  Future<void> pauseActivity(String id) async {
+    final index = activities.indexWhere((activity) => activity.id == id);
+    if (index == -1) {
+      return;
+    }
+    final activity = activities[index];
+    if (!activity.isRunning || activity.isPaused) {
+      return;
+    }
+    final updated = activity.copyWith(pausedAt: DateTime.now());
+    activities[index] = updated;
+    await localStorage.upsertActivity(updated.toDbRow());
+    notifyListeners();
+  }
+
+  Future<void> resumeActivity(String id) async {
+    final index = activities.indexWhere((activity) => activity.id == id);
+    if (index == -1) {
+      return;
+    }
+    final activity = activities[index];
+    final pausedAt = activity.pausedAt;
+    if (pausedAt == null) {
+      return;
+    }
+    final updated = activity.copyWith(
+      pausedSeconds:
+          activity.pausedSeconds +
+          DateTime.now().difference(pausedAt).inSeconds,
+      clearPausedAt: true,
+    );
+    activities[index] = updated;
+    await localStorage.upsertActivity(updated.toDbRow());
     notifyListeners();
   }
 
@@ -1750,28 +1860,40 @@ class AppController extends ChangeNotifier {
     if (index == -1) {
       return;
     }
-    if (!activities[index].isRunning) {
+    final activity = activities[index];
+    if (!activity.isRunning) {
       return;
     }
-    activities[index] = activities[index].copyWith(endAt: DateTime.now());
-    await _save();
+    final now = DateTime.now();
+    final pausedAt = activity.pausedAt;
+    final updated = activity.copyWith(
+      endAt: now,
+      pausedSeconds: pausedAt == null
+          ? activity.pausedSeconds
+          : activity.pausedSeconds + now.difference(pausedAt).inSeconds,
+      clearPausedAt: true,
+    );
+    activities[index] = updated;
+    await localStorage.upsertActivity(updated.toDbRow());
     notifyListeners();
   }
 
-  Future<File> exportCsv() async {
+  Future<File> exportXlsx() async {
     final entries = activitiesInRange(reportStart, reportEnd);
-    final file = await exportService.writeCsv(
+    final file = await exportService.writeXlsx(
       entries: entries,
       projects: {for (final project in projects) project.id: project},
       start: reportStart,
       end: reportEnd,
     );
+    const xlsxMimeType =
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     await SharePlus.instance.share(
       ShareParams(
-        title: 'Metric Hours CSV',
+        title: 'Metric Hours Excel',
         text:
             'Historial de actividades ${formatDate(reportStart)} - ${formatDate(reportEnd)}',
-        files: [XFile(file.path, mimeType: 'text/csv')],
+        files: [XFile(file.path, mimeType: xlsxMimeType)],
       ),
     );
     return file;
@@ -1785,11 +1907,6 @@ class AppController extends ChangeNotifier {
       activities[index] = entry;
     }
   }
-
-  Future<void> _save() => localStorage.write(
-    projects: projects.map((project) => project.toLocalJson()).toList(),
-    activities: activities.map((activity) => activity.toLocalJson()).toList(),
-  );
 
   String _newId() => DateTime.now().microsecondsSinceEpoch.toString();
 
@@ -1824,51 +1941,75 @@ class AppController extends ChangeNotifier {
 }
 
 class ExportService {
-  Future<File> writeCsv({
+  Future<File> writeXlsx({
     required List<ActivityEntry> entries,
     required Map<String, Project> projects,
     required DateTime start,
     required DateTime end,
   }) async {
-    final directory = await getApplicationDocumentsDirectory();
-    final file = File(
-      '${directory.path}/metric_hours_${dateKey(start)}_${dateKey(end)}.csv',
-    );
-    final buffer = StringBuffer()
-      ..writeln(
-        [
-          'Proyecto',
-          'Actividad',
-          'Fecha inicio',
-          'Hora inicio',
-          'Fecha fin',
-          'Hora fin',
-          'Duracion',
-          'Minutos',
-        ].map(csvCell).join(','),
-      );
+    final workbook = xlsx.Excel.createExcel();
+    final defaultSheetName = workbook.getDefaultSheet()!;
+    workbook.rename(defaultSheetName, 'Detalle');
 
-    for (final entry in entries) {
+    final detail = workbook['Detalle'];
+    detail.appendRow([
+      xlsx.TextCellValue('Proyecto'),
+      xlsx.TextCellValue('Actividad'),
+      xlsx.TextCellValue('Fecha inicio'),
+      xlsx.TextCellValue('Hora inicio'),
+      xlsx.TextCellValue('Fecha fin'),
+      xlsx.TextCellValue('Hora fin'),
+      xlsx.TextCellValue('Duracion'),
+      xlsx.TextCellValue('Horas'),
+    ]);
+
+    final sortedEntries = entries.toList()
+      ..sort((a, b) => a.startAt.compareTo(b.startAt));
+    for (final entry in sortedEntries) {
       final project = projects[entry.projectId];
       final duration = entry.effectiveDuration;
-      buffer.writeln(
-        [
-          project?.name ?? 'Proyecto eliminado',
-          entry.description,
-          formatDate(entry.startAt),
-          formatTime(entry.startAt),
+      detail.appendRow([
+        xlsx.TextCellValue(project?.name ?? 'Proyecto eliminado'),
+        xlsx.TextCellValue(entry.description),
+        xlsx.TextCellValue(formatDate(entry.startAt)),
+        xlsx.TextCellValue(formatTime(entry.startAt)),
+        xlsx.TextCellValue(
           entry.endAt == null ? '' : formatDate(entry.endAt!),
+        ),
+        xlsx.TextCellValue(
           entry.endAt == null ? '' : formatTime(entry.endAt!),
-          durationLabel(duration),
-          (duration.inSeconds / 60).toStringAsFixed(2),
-        ].map(csvCell).join(','),
-      );
+        ),
+        xlsx.TextCellValue(durationLabel(duration)),
+        xlsx.DoubleCellValue(duration.inSeconds / 3600),
+      ]);
     }
 
-    // El BOM UTF-8 hace que Excel detecte la codificacion correcta en vez
-    // de asumir la codificacion ANSI del sistema, que rompe acentos y enies.
-    const utf8Bom = '﻿';
-    await file.writeAsString('$utf8Bom${buffer.toString()}', encoding: utf8);
+    final summary = workbook['Resumen diario'];
+    summary.appendRow([
+      xlsx.TextCellValue('Fecha'),
+      xlsx.TextCellValue('Horas normales'),
+      xlsx.TextCellValue('Horas extra'),
+      xlsx.TextCellValue('Horas totales'),
+    ]);
+    for (final split in dailySplits(entries, start, end)) {
+      summary.appendRow([
+        xlsx.TextCellValue(formatDate(split.day)),
+        xlsx.DoubleCellValue(split.regular.inSeconds / 3600),
+        xlsx.DoubleCellValue(split.overtime.inSeconds / 3600),
+        xlsx.DoubleCellValue(split.total.inSeconds / 3600),
+      ]);
+    }
+
+    final bytes = workbook.encode();
+    if (bytes == null) {
+      throw const AppException('No se pudo generar el archivo Excel.');
+    }
+
+    final directory = await getApplicationDocumentsDirectory();
+    final file = File(
+      '${directory.path}/metric_hours_${dateKey(start)}_${dateKey(end)}.xlsx',
+    );
+    await file.writeAsBytes(bytes, flush: true);
     return file;
   }
 }
@@ -1908,18 +2049,18 @@ class Project {
     );
   }
 
-  factory Project.fromLocalJson(Map<String, dynamic> json) {
+  factory Project.fromDbRow(Map<String, Object?> row) {
     return Project(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      color: json['color'] as int,
-      isActive: json['isActive'] as bool,
-      createdAt: DateTime.parse(json['createdAt'] as String),
-      descripcion: json['descripcion'] as String?,
-      presupuestoHoras: json['presupuestoHoras'] as int?,
-      archivedAt: json['archivedAt'] == null
+      id: row['id'] as String,
+      name: row['name'] as String,
+      color: row['color'] as int,
+      isActive: (row['isActive'] as int) == 1,
+      createdAt: DateTime.parse(row['createdAt'] as String),
+      descripcion: row['descripcion'] as String?,
+      presupuestoHoras: row['presupuestoHoras'] as int?,
+      archivedAt: row['archivedAt'] == null
           ? null
-          : DateTime.parse(json['archivedAt'] as String),
+          : DateTime.parse(row['archivedAt'] as String),
     );
   }
 
@@ -1942,11 +2083,11 @@ class Project {
     );
   }
 
-  Map<String, dynamic> toLocalJson() => {
+  Map<String, Object?> toDbRow() => {
     'id': id,
     'name': name,
     'color': color,
-    'isActive': isActive,
+    'isActive': isActive ? 1 : 0,
     'createdAt': createdAt.toIso8601String(),
     'descripcion': descripcion,
     'presupuestoHoras': presupuestoHoras,
@@ -1961,6 +2102,8 @@ class ActivityEntry {
     required this.description,
     required this.startAt,
     this.endAt,
+    this.pausedSeconds = 0,
+    this.pausedAt,
   });
 
   final String id;
@@ -1968,15 +2111,20 @@ class ActivityEntry {
   final String description;
   final DateTime startAt;
   final DateTime? endAt;
+  final int pausedSeconds;
+  final DateTime? pausedAt;
 
   bool get isRunning => endAt == null;
+  bool get isPaused => isRunning && pausedAt != null;
 
   Duration get effectiveDuration {
-    final finish = endAt ?? DateTime.now();
-    if (finish.isBefore(startAt)) {
+    final reference = isPaused ? pausedAt! : (endAt ?? DateTime.now());
+    if (reference.isBefore(startAt)) {
       return Duration.zero;
     }
-    return finish.difference(startAt);
+    final elapsed =
+        reference.difference(startAt) - Duration(seconds: pausedSeconds);
+    return elapsed.isNegative ? Duration.zero : elapsed;
   }
 
   /// El backend distingue TIMER (con `horaInicio`/`horaFin` reales) de
@@ -2006,32 +2154,45 @@ class ActivityEntry {
     );
   }
 
-  factory ActivityEntry.fromLocalJson(Map<String, dynamic> json) {
+  factory ActivityEntry.fromDbRow(Map<String, Object?> row) {
     return ActivityEntry(
-      id: json['id'] as String,
-      projectId: json['projectId'] as String,
-      description: json['description'] as String,
-      startAt: DateTime.parse(json['startAt'] as String),
-      endAt: json['endAt'] == null
+      id: row['id'] as String,
+      projectId: row['projectId'] as String,
+      description: row['description'] as String,
+      startAt: DateTime.parse(row['startAt'] as String),
+      endAt: row['endAt'] == null
           ? null
-          : DateTime.parse(json['endAt'] as String),
+          : DateTime.parse(row['endAt'] as String),
+      pausedSeconds: (row['pausedSeconds'] as int?) ?? 0,
+      pausedAt: row['pausedAt'] == null
+          ? null
+          : DateTime.parse(row['pausedAt'] as String),
     );
   }
 
-  ActivityEntry copyWith({DateTime? endAt}) => ActivityEntry(
+  ActivityEntry copyWith({
+    DateTime? endAt,
+    int? pausedSeconds,
+    DateTime? pausedAt,
+    bool clearPausedAt = false,
+  }) => ActivityEntry(
     id: id,
     projectId: projectId,
     description: description,
     startAt: startAt,
     endAt: endAt ?? this.endAt,
+    pausedSeconds: pausedSeconds ?? this.pausedSeconds,
+    pausedAt: clearPausedAt ? null : pausedAt ?? this.pausedAt,
   );
 
-  Map<String, dynamic> toLocalJson() => {
+  Map<String, Object?> toDbRow() => {
     'id': id,
     'projectId': projectId,
     'description': description,
     'startAt': startAt.toIso8601String(),
     'endAt': endAt?.toIso8601String(),
+    'pausedSeconds': pausedSeconds,
+    'pausedAt': pausedAt?.toIso8601String(),
   };
 }
 
@@ -2078,6 +2239,17 @@ int colorFromHex(String? hex) {
 
 DateTime dayOnly(DateTime value) {
   return DateTime(value.year, value.month, value.day);
+}
+
+/// Lunes de la semana que contiene [value] (`DateTime.weekday`: lunes = 1).
+DateTime startOfWeek(DateTime value) {
+  final day = dayOnly(value);
+  return day.subtract(Duration(days: day.weekday - 1));
+}
+
+/// Domingo de la semana que contiene [value].
+DateTime endOfWeek(DateTime value) {
+  return startOfWeek(value).add(const Duration(days: 6));
 }
 
 bool isSameDay(DateTime a, DateTime b) {
@@ -2151,6 +2323,43 @@ List<MapEntry<DateTime, Duration>> dailyDurations(
   ];
 }
 
+/// A partir de esta cantidad de horas trabajadas en un mismo dia, el resto
+/// se contabiliza como horas extra.
+const dailyOvertimeThreshold = Duration(hours: 8);
+
+class DailySplit {
+  const DailySplit({
+    required this.day,
+    required this.regular,
+    required this.overtime,
+  });
+
+  final DateTime day;
+  final Duration regular;
+  final Duration overtime;
+
+  Duration get total => regular + overtime;
+}
+
+List<DailySplit> dailySplits(
+  List<ActivityEntry> activities,
+  DateTime start,
+  DateTime end,
+) {
+  return [
+    for (final entry in dailyDurations(activities, start, end))
+      DailySplit(
+        day: entry.key,
+        regular: entry.value > dailyOvertimeThreshold
+            ? dailyOvertimeThreshold
+            : entry.value,
+        overtime: entry.value > dailyOvertimeThreshold
+            ? entry.value - dailyOvertimeThreshold
+            : Duration.zero,
+      ),
+  ];
+}
+
 const _weekdayShortNames = [
   '',
   'lun',
@@ -2186,16 +2395,6 @@ String humanDurationLabel(Duration duration) {
   }
   parts.add('${seconds}s');
   return parts.join(' ');
-}
-
-String csvCell(String value) {
-  final escaped = value.replaceAll('"', '""');
-  if (escaped.contains(',') ||
-      escaped.contains('\n') ||
-      escaped.contains('"')) {
-    return '"$escaped"';
-  }
-  return escaped;
 }
 
 void _showMessage(BuildContext context, String message) {
