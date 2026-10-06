@@ -4,8 +4,10 @@ import '../main.dart'
     show ActivityEntry, ExportService, Project, dateKey, dayOnly, formatDate;
 import '../services/email_service.dart';
 import '../services/email_settings_service.dart';
+import '../services/holidays_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/notification_service.dart';
+import '../services/working_days_service.dart';
 
 /// Nombre unico de la tarea de WorkManager que genera y envia el reporte de
 /// "hoy" por correo.
@@ -36,11 +38,16 @@ void dailyReportCallbackDispatcher() {
             .where((activity) => dateKey(activity.startAt) == todayKey)
             .toList();
 
+        final inactiveDays = await HolidaysService(localStorage).load();
+        final workingWeekdays = await WorkingDaysService(localStorage).load();
+
         final file = await ExportService().writeXlsx(
           entries: todaysActivities,
           projects: {for (final project in projects) project.id: project},
           start: today,
           end: today,
+          inactiveDays: inactiveDays,
+          workingWeekdays: workingWeekdays,
         );
 
         await EmailService().sendReport(

@@ -17,9 +17,11 @@ import 'models/proyecto_dto.dart';
 import 'models/registro_hora_dto.dart';
 import 'services/email_service.dart';
 import 'services/email_settings_service.dart';
+import 'services/holidays_service.dart';
 import 'services/local_storage_service.dart';
 import 'services/log_service.dart';
 import 'services/notification_service.dart';
+import 'services/working_days_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -389,6 +391,8 @@ class _SettingsPageState extends State<SettingsPage> {
         projects: {for (final project in app.projects) project.id: project},
         start: today,
         end: today,
+        inactiveDays: app.inactiveDays,
+        workingWeekdays: app.workingWeekdays,
       );
       await _emailService.sendReport(
         settings: settings,
@@ -424,6 +428,24 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
     await Permission.ignoreBatteryOptimizations.request();
+  }
+
+  Future<void> _pickInactiveDay(AppController app) async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year + 5),
+      helpText: 'Selecciona un dia inhabil',
+    );
+    if (picked == null) {
+      return;
+    }
+    await app.addInactiveDay(picked);
+    if (mounted) {
+      _showMessage(context, 'Dia agregado como inhabil.');
+    }
   }
 
   @override
@@ -654,6 +676,90 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
         const SizedBox(height: 20),
+        Text('Dias laborales', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Las horas que registres en un dia no marcado aqui se '
+                  'contaran como horas adicionales.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (var weekday = 1; weekday <= 7; weekday++)
+                      FilterChip(
+                        label: Text(_weekdayToggleLabels[weekday]),
+                        selected: app.workingWeekdays.contains(weekday),
+                        onSelected: (selected) async {
+                          try {
+                            await app.setWorkingWeekday(weekday, selected);
+                          } on AppException catch (error) {
+                            if (mounted) {
+                              _showMessage(context, error.message);
+                            }
+                          }
+                        },
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
+        Text('Dias inhabiles', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Si registras horas en uno de estos dias, se contaran '
+                  'integras como horas adicionales en el resumen.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                if (app.sortedInactiveDays.isEmpty)
+                  Text(
+                    'Sin dias inhabiles configurados.',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  )
+                else
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final day in app.sortedInactiveDays)
+                        InputChip(
+                          label: Text(formatDate(day)),
+                          onDeleted: () => app.removeInactiveDay(day),
+                        ),
+                    ],
+                  ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.event_busy_outlined),
+                    label: const Text('Agregar dia inhabil'),
+                    onPressed: () => _pickInactiveDay(app),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 20),
         Text('Acerca de', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         Card(
@@ -709,14 +815,38 @@ class RegisterPage extends StatelessWidget {
       animation: app,
       builder: (context, _) {
         final activities = app.activitiesForDay(app.selectedDay);
+        final pausedActivities = app.pausedActivities;
+        final isExtraHoursDay = app.isExtraHoursDay(app.selectedDay);
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
           children: [
             DaySelector(value: app.selectedDay, onChanged: app.selectDay),
             const SizedBox(height: 12),
-            if (app.runningActivity != null)
-              ActiveActivityPanel(activity: app.runningActivity!)
+            if (isExtraHoursDay)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Card(
+                  color: Theme.of(context).colorScheme.tertiaryContainer,
+                  child: const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(Icons.event_busy_outlined),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Dia no laboral: las horas que registres hoy se '
+                            'contaran como horas adicionales.',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            if (app.activeActivity != null)
+              ActiveActivityPanel(activity: app.activeActivity!)
             else
               SizedBox(
                 width: double.infinity,
@@ -726,6 +856,30 @@ class RegisterPage extends StatelessWidget {
                   onPressed: () => _openNewActivitySheet(context, app),
                 ),
               ),
+            if (app.activeActivity != null) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.add),
+                  label: const Text('Iniciar otra actividad'),
+                  onPressed: () => _openNewActivitySheet(context, app),
+                ),
+              ),
+            ],
+            if (pausedActivities.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Text(
+                'Pausadas (${pausedActivities.length})',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              for (final activity in pausedActivities)
+                PausedActivityCard(
+                  activity: activity,
+                  project: app.projectById(activity.projectId),
+                ),
+            ],
             const SizedBox(height: 20),
             Text(
               'Actividades ${formatDate(app.selectedDay)}',
@@ -817,9 +971,23 @@ class ActiveActivityPanel extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            Text(
-              activity.description,
-              style: Theme.of(context).textTheme.titleMedium,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    activity.description,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _editActivityDescription(context, app, activity),
+                  child: const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Icon(Icons.edit_outlined, size: 20),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             Row(
@@ -845,6 +1013,83 @@ class ActiveActivityPanel extends StatelessWidget {
                     onPressed: () async {
                       await app.stopActivity(activity.id);
                     },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class PausedActivityCard extends StatelessWidget {
+  const PausedActivityCard({
+    required this.activity,
+    required this.project,
+    super.key,
+  });
+
+  final ActivityEntry activity;
+  final Project project;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: ProjectName(project: project)),
+                Text(
+                  compactDurationLabel(activity.effectiveDuration),
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    activity.description,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _editActivityDescription(context, app, activity),
+                  child: const Padding(
+                    padding: EdgeInsets.all(2),
+                    child: Icon(Icons.edit_outlined, size: 18),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Reanudar'),
+                    onPressed: () => app.resumeActivity(activity.id),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Detener'),
+                    onPressed: () => app.stopActivity(activity.id),
                   ),
                 ),
               ],
@@ -1404,8 +1649,69 @@ class _ColorSwatch extends StatelessWidget {
   }
 }
 
-class ReportsPage extends StatelessWidget {
+class ReportsPage extends StatefulWidget {
   const ReportsPage({super.key});
+
+  @override
+  State<ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<ReportsPage> {
+  late DateTime _projectReportStart;
+  late DateTime _projectReportEnd;
+
+  @override
+  void initState() {
+    super.initState();
+    _projectReportStart = dayOnly(DateTime.now());
+    _projectReportEnd = _projectReportStart;
+  }
+
+  Future<void> _selectProjectReportRange() async {
+    final range = await showDateRangePicker(
+      context: context,
+      initialDateRange: DateTimeRange(
+        start: _projectReportStart,
+        end: _projectReportEnd,
+      ),
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      helpText: 'Rango para proyectos y detalle',
+    );
+    if (range == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _projectReportStart = dayOnly(range.start);
+      _projectReportEnd = dayOnly(range.end);
+    });
+  }
+
+  Future<void> _exportExcel(AppController app) async {
+    final today = dayOnly(DateTime.now());
+    final range = await showDateRangePicker(
+      context: context,
+      initialDateRange: DateTimeRange(start: today, end: today),
+      firstDate: DateTime(2020),
+      lastDate: today,
+      helpText: 'Rango para exportar',
+    );
+    if (range == null || !mounted) {
+      return;
+    }
+
+    final entries = app.activitiesInRange(range.start, range.end);
+    if (entries.isEmpty) {
+      _showMessage(context, 'El rango seleccionado no tiene actividades.');
+      return;
+    }
+
+    final file = await app.exportXlsx(start: range.start, end: range.end);
+    if (!mounted) {
+      return;
+    }
+    _showMessage(context, 'Archivo generado: ${file.path}');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1414,20 +1720,36 @@ class ReportsPage extends StatelessWidget {
     return AnimatedBuilder(
       animation: app,
       builder: (context, _) {
-        final activities = app.activitiesInRange(
-          app.reportStart,
-          app.reportEnd,
-        );
-        final totals = app.projectTotalsFor(activities);
-        final totalDuration = activities.fold<Duration>(
+        final today = dayOnly(DateTime.now());
+        final todayActivities = app.activitiesForDay(today);
+        final totalDuration = todayActivities.fold<Duration>(
           Duration.zero,
           (value, activity) => value + activity.effectiveDuration,
         );
-        final splits = dailySplits(activities, app.reportStart, app.reportEnd);
-        final overtimeDuration = splits.fold<Duration>(
-          Duration.zero,
-          (value, split) => value + split.overtime,
+        final todaySplit = dailySplits(
+          todayActivities,
+          today,
+          today,
+          inactiveDays: app.inactiveDays,
+          workingWeekdays: app.workingWeekdays,
+        ).single;
+        final weekStart = startOfWeek(today);
+        final weekEnd = endOfWeek(today);
+        final weeklySplits = dailySplits(
+          app.activitiesInRange(weekStart, weekEnd),
+          weekStart,
+          weekEnd,
+          inactiveDays: app.inactiveDays,
+          workingWeekdays: app.workingWeekdays,
         );
+        final projectActivities = app.activitiesInRange(
+          _projectReportStart,
+          _projectReportEnd,
+        );
+        final projectTotals = app.projectTotalsFor(projectActivities);
+        final projectRangeLabel = _projectReportStart == _projectReportEnd
+            ? formatDate(_projectReportStart)
+            : '${formatDate(_projectReportStart)} - ${formatDate(_projectReportEnd)}';
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
@@ -1435,108 +1757,97 @@ class ReportsPage extends StatelessWidget {
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: DateButton(
-                            label: 'Desde',
-                            value: app.reportStart,
-                            onSelected: (date) =>
-                                app.setReportRange(date, app.reportEnd),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: DateButton(
-                            label: 'Hasta',
-                            value: app.reportEnd,
-                            onSelected: (date) =>
-                                app.setReportRange(app.reportStart, date),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: SummaryMetric(
-                            label: 'Actividades',
-                            value: '${activities.length}',
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: SummaryMetric(
-                            label: 'Tiempo',
-                            value: compactDurationLabel(totalDuration),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: SummaryMetric(
-                            label: 'Horas extra',
-                            value: compactDurationLabel(overtimeDuration),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        icon: const Icon(Icons.ios_share),
-                        label: const Text('Exportar Excel'),
-                        onPressed: activities.isEmpty
-                            ? null
-                            : () async {
-                                final file = await app.exportXlsx();
-                                if (!context.mounted) {
-                                  return;
-                                }
-                                _showMessage(
-                                  context,
-                                  'Archivo generado: ${file.path}',
-                                );
-                              },
-                      ),
-                    ),
-                  ],
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.ios_share),
+                    label: const Text('Exportar Excel'),
+                    onPressed: () => _exportExcel(app),
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 20),
-            if (activities.isEmpty)
+            Text(
+              'Horas por dia',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: SummaryMetric(
+                    label: 'Actividades',
+                    value: '${todayActivities.length}',
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: SummaryMetric(
+                    label: 'Tiempo',
+                    value: compactDurationLabel(totalDuration),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: SummaryMetric(
+                    label: 'Horas extra',
+                    value: compactDurationLabel(todaySplit.overtime),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            DailyHoursChart(dailySplits: weeklySplits),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Por proyecto',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      Text(
+                        projectRangeLabel,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Cambiar rango de fechas',
+                  icon: const Icon(Icons.calendar_month_outlined),
+                  onPressed: _selectProjectReportRange,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (projectActivities.isEmpty)
               const EmptyState(
-                icon: Icons.query_stats_outlined,
+                icon: Icons.folder_off_outlined,
                 title: 'Sin datos',
                 subtitle: 'El rango seleccionado no tiene actividades.',
               )
-            else ...[
-              Text(
-                'Horas por dia',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              DailyHoursChart(dailySplits: splits),
-              const SizedBox(height: 20),
-              Text(
-                'Por proyecto',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              ProjectBreakdownChart(totals: totals),
-            ],
+            else
+              ProjectBreakdownChart(totals: projectTotals),
             const SizedBox(height: 20),
             Text('Detalle', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
-            for (final activity in activities)
-              ActivityTile(
-                activity: activity,
-                project: app.projectById(activity.projectId),
-              ),
+            if (projectActivities.isEmpty)
+              const EmptyState(
+                icon: Icons.event_available_outlined,
+                title: 'Sin actividades',
+                subtitle: 'El rango seleccionado no tiene registros.',
+              )
+            else
+              for (final activity in projectActivities)
+                ActivityTile(
+                  activity: activity,
+                  project: app.projectById(activity.projectId),
+                ),
           ],
         );
       },
@@ -1826,6 +2137,31 @@ class DateButton extends StatelessWidget {
   }
 }
 
+/// Abre el dialogo de edicion de descripcion para [activity] y, si se
+/// confirma, guarda el cambio via [app]. Compartido por los widgets que
+/// muestran una actividad (activa, pausada o del historial).
+Future<void> _editActivityDescription(
+  BuildContext context,
+  AppController app,
+  ActivityEntry activity,
+) async {
+  final newDescription = await showDialog<String>(
+    context: context,
+    builder: (context) =>
+        _EditActivityDescriptionDialog(initialDescription: activity.description),
+  );
+  if (newDescription == null || !context.mounted) {
+    return;
+  }
+  try {
+    await app.updateActivityDescription(activity.id, newDescription);
+  } on AppException catch (error) {
+    if (context.mounted) {
+      _showMessage(context, error.message);
+    }
+  }
+}
+
 class ActivityTile extends StatelessWidget {
   const ActivityTile({
     required this.activity,
@@ -1838,6 +2174,7 @@ class ActivityTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final app = AppScope.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -1855,9 +2192,24 @@ class ActivityTile extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            Text(
-              activity.description,
-              style: Theme.of(context).textTheme.titleSmall,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    activity.description,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _editActivityDescription(context, app, activity),
+                  child: const Padding(
+                    padding: EdgeInsets.all(2),
+                    child: Icon(Icons.edit_outlined, size: 18),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 8),
             Wrap(
@@ -1884,6 +2236,61 @@ class ActivityTile extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _EditActivityDescriptionDialog extends StatefulWidget {
+  const _EditActivityDescriptionDialog({required this.initialDescription});
+
+  final String initialDescription;
+
+  @override
+  State<_EditActivityDescriptionDialog> createState() =>
+      _EditActivityDescriptionDialogState();
+}
+
+class _EditActivityDescriptionDialogState
+    extends State<_EditActivityDescriptionDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialDescription);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _pop() => Navigator.of(context).pop(_controller.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Editar actividad'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        minLines: 2,
+        maxLines: 4,
+        textInputAction: TextInputAction.done,
+        decoration: const InputDecoration(
+          labelText: 'Actividad',
+          prefixIcon: Icon(Icons.edit_note),
+        ),
+        onSubmitted: (_) => _pop(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancelar'),
+        ),
+        FilledButton(onPressed: _pop, child: const Text('Guardar')),
+      ],
     );
   }
 }
@@ -2007,11 +2414,15 @@ class AppController extends ChangeNotifier {
   final LocalStorageService localStorage;
   final ExportService exportService;
   final NotificationService notifications;
+  late final HolidaysService holidaysService = HolidaysService(localStorage);
+  late final WorkingDaysService workingDaysService = WorkingDaysService(
+    localStorage,
+  );
   final List<Project> projects = [];
   final List<ActivityEntry> activities = [];
+  final Set<DateTime> inactiveDays = {};
+  Set<int> workingWeekdays = {...WorkingDaysService.defaultWorkingWeekdays};
   DateTime selectedDay = dayOnly(DateTime.now());
-  DateTime reportStart = startOfWeek(DateTime.now());
-  DateTime reportEnd = endOfWeek(DateTime.now());
   ThemeMode themeMode = ThemeMode.system;
   bool isLoaded = false;
   Timer? _ticker;
@@ -2022,8 +2433,34 @@ class AppController extends ChangeNotifier {
   List<Project> get activeProjects =>
       projects.where((project) => project.isActive).toList();
 
-  ActivityEntry? get runningActivity =>
-      activities.where((activity) => activity.isRunning).firstOrNull;
+  /// La (unica) actividad que esta corriendo activamente en este momento.
+  /// Iniciar o reanudar otra actividad pausa automaticamente esta.
+  ActivityEntry? get activeActivity => activities
+      .where((activity) => activity.isRunning && !activity.isPaused)
+      .firstOrNull;
+
+  /// Actividades que quedaron en pausa (se pueden retomar en cualquier
+  /// momento), ordenadas de la mas reciente a la mas antigua.
+  List<ActivityEntry> get pausedActivities {
+    final list = activities.where((activity) => activity.isPaused).toList()
+      ..sort(
+        (a, b) => (b.pausedAt ?? b.startAt).compareTo(a.pausedAt ?? a.startAt),
+      );
+    return list;
+  }
+
+  List<DateTime> get sortedInactiveDays => inactiveDays.toList()..sort();
+
+  bool isInactiveDay(DateTime day) => inactiveDays.contains(dayOnly(day));
+
+  /// `true` si el dia no es laboral: o bien es un dia inhabil especifico, o
+  /// bien su dia de la semana no esta marcado como laboral. Las horas
+  /// registradas ese dia se cuentan integras como adicionales.
+  bool isExtraHoursDay(DateTime day) {
+    final normalized = dayOnly(day);
+    return isInactiveDay(normalized) ||
+        !workingWeekdays.contains(normalized.weekday);
+  }
 
   /// Carga los datos que se guardaron previamente en este dispositivo.
   Future<void> load() async {
@@ -2050,15 +2487,16 @@ class AppController extends ChangeNotifier {
         orElse: () => ThemeMode.system,
       );
 
+      inactiveDays
+        ..clear()
+        ..addAll(await holidaysService.load());
+
+      workingWeekdays = await workingDaysService.load();
+
       selectedDay = dayOnly(DateTime.now());
-      reportStart = startOfWeek(selectedDay);
-      reportEnd = endOfWeek(selectedDay);
 
       await notifications.initialize();
-      final active = runningActivity;
-      if (active != null) {
-        await _syncNotification(active);
-      }
+      await _refreshNotification();
 
       // Red de seguridad: si por lo que sea la cadena de reprogramacion del
       // envio diario se corto (por ejemplo la tarea nunca llego a correr),
@@ -2078,19 +2516,6 @@ class AppController extends ChangeNotifier {
 
   Future<void> selectDay(DateTime value) async {
     selectedDay = dayOnly(value);
-    notifyListeners();
-  }
-
-  Future<void> setReportRange(DateTime start, DateTime end) async {
-    var normalizedStart = dayOnly(start);
-    var normalizedEnd = dayOnly(end);
-    if (normalizedEnd.isBefore(normalizedStart)) {
-      final swap = normalizedStart;
-      normalizedStart = normalizedEnd;
-      normalizedEnd = swap;
-    }
-    reportStart = normalizedStart;
-    reportEnd = normalizedEnd;
     notifyListeners();
   }
 
@@ -2223,6 +2648,9 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Inicia una actividad nueva. Si ya habia una actividad activa (no en
+  /// pausa), esta se pausa automaticamente para dejar solo una corriendo a
+  /// la vez; las que ya estaban en pausa no se ven afectadas.
   Future<void> startActivity({
     required String projectId,
     required String description,
@@ -2235,10 +2663,10 @@ class AppController extends ChangeNotifier {
     if (!project.isActive) {
       throw const AppException('El proyecto seleccionado no esta activo.');
     }
-    if (runningActivity != null) {
-      throw const AppException(
-        'Deten la actividad actual antes de iniciar otra.',
-      );
+
+    final current = activeActivity;
+    if (current != null) {
+      await pauseActivity(current.id);
     }
 
     final entry = ActivityEntry(
@@ -2250,7 +2678,7 @@ class AppController extends ChangeNotifier {
     _upsertActivity(entry);
     selectedDay = dayOnly(DateTime.now());
     await localStorage.upsertActivity(entry.toDbRow());
-    await _syncNotification(entry);
+    await _refreshNotification();
     notifyListeners();
   }
 
@@ -2266,10 +2694,12 @@ class AppController extends ChangeNotifier {
     final updated = activity.copyWith(pausedAt: DateTime.now());
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
-    await _syncNotification(updated);
+    await _refreshNotification();
     notifyListeners();
   }
 
+  /// Retoma una actividad en pausa. Si otra actividad estaba corriendo en
+  /// ese momento, se pausa primero (solo una puede estar activa a la vez).
   Future<void> resumeActivity(String id) async {
     final index = activities.indexWhere((activity) => activity.id == id);
     if (index == -1) {
@@ -2280,6 +2710,12 @@ class AppController extends ChangeNotifier {
     if (pausedAt == null) {
       return;
     }
+
+    final current = activeActivity;
+    if (current != null && current.id != id) {
+      await pauseActivity(current.id);
+    }
+
     final updated = activity.copyWith(
       pausedSeconds:
           activity.pausedSeconds +
@@ -2288,7 +2724,7 @@ class AppController extends ChangeNotifier {
     );
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
-    await _syncNotification(updated);
+    await _refreshNotification();
     notifyListeners();
   }
 
@@ -2312,8 +2748,81 @@ class AppController extends ChangeNotifier {
     );
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
-    await notifications.cancel();
+    await _refreshNotification();
     notifyListeners();
+  }
+
+  /// Permite corregir la descripcion de una actividad ya creada, sin
+  /// importar si sigue corriendo, esta pausada o ya termino.
+  Future<void> updateActivityDescription(
+    String id,
+    String rawDescription,
+  ) async {
+    final cleanDescription = rawDescription.trim();
+    if (cleanDescription.isEmpty) {
+      throw const AppException('Describe la actividad.');
+    }
+    final index = activities.indexWhere((activity) => activity.id == id);
+    if (index == -1) {
+      return;
+    }
+    final updated = activities[index].copyWith(description: cleanDescription);
+    activities[index] = updated;
+    await localStorage.upsertActivity(updated.toDbRow());
+    await _refreshNotification();
+    notifyListeners();
+  }
+
+  Future<void> addInactiveDay(DateTime day) async {
+    final normalized = dayOnly(day);
+    if (!inactiveDays.add(normalized)) {
+      return;
+    }
+    await holidaysService.save(inactiveDays);
+    notifyListeners();
+  }
+
+  Future<void> removeInactiveDay(DateTime day) async {
+    final normalized = dayOnly(day);
+    if (!inactiveDays.remove(normalized)) {
+      return;
+    }
+    await holidaysService.save(inactiveDays);
+    notifyListeners();
+  }
+
+  /// Marca o desmarca [weekday] (1 = lunes ... 7 = domingo) como dia
+  /// laboral. Debe quedar al menos un dia laboral en la semana.
+  Future<void> setWorkingWeekday(int weekday, bool isWorking) async {
+    final updated = {...workingWeekdays};
+    if (isWorking) {
+      updated.add(weekday);
+    } else {
+      updated.remove(weekday);
+    }
+    if (updated.isEmpty) {
+      throw const AppException('Debe quedar al menos un dia laboral.');
+    }
+    workingWeekdays = updated;
+    await workingDaysService.save(workingWeekdays);
+    notifyListeners();
+  }
+
+  /// Refleja en la notificacion de la barra de Android la actividad activa;
+  /// si no hay ninguna corriendo, muestra la ultima que quedo en pausa (para
+  /// no perder de vista que sigue abierta) o la cancela si no queda nada.
+  Future<void> _refreshNotification() async {
+    final active = activeActivity;
+    if (active != null) {
+      await _syncNotification(active);
+      return;
+    }
+    final lastPaused = pausedActivities.firstOrNull;
+    if (lastPaused != null) {
+      await _syncNotification(lastPaused);
+      return;
+    }
+    await notifications.cancel();
   }
 
   /// Refleja el estado de [activity] en la notificacion de la barra de
@@ -2337,13 +2846,20 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<File> exportXlsx() async {
-    final entries = activitiesInRange(reportStart, reportEnd);
+  Future<File> exportXlsx({
+    required DateTime start,
+    required DateTime end,
+  }) async {
+    final normalizedStart = dayOnly(start);
+    final normalizedEnd = dayOnly(end);
+    final entries = activitiesInRange(normalizedStart, normalizedEnd);
     final file = await exportService.writeXlsx(
       entries: entries,
       projects: {for (final project in projects) project.id: project},
-      start: reportStart,
-      end: reportEnd,
+      start: normalizedStart,
+      end: normalizedEnd,
+      inactiveDays: inactiveDays,
+      workingWeekdays: workingWeekdays,
     );
     const xlsxMimeType =
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -2351,7 +2867,7 @@ class AppController extends ChangeNotifier {
       ShareParams(
         title: 'Metric Hours Excel',
         text:
-            'Historial de actividades ${formatDate(reportStart)} - ${formatDate(reportEnd)}',
+            'Historial de actividades ${formatDate(normalizedStart)} - ${formatDate(normalizedEnd)}',
         files: [XFile(file.path, mimeType: xlsxMimeType)],
       ),
     );
@@ -2372,7 +2888,7 @@ class AppController extends ChangeNotifier {
   void _startTicker() {
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (runningActivity != null) {
+      if (activeActivity != null) {
         notifyListeners();
       }
     });
@@ -2405,6 +2921,8 @@ class ExportService {
     required Map<String, Project> projects,
     required DateTime start,
     required DateTime end,
+    Set<DateTime> inactiveDays = const {},
+    Set<int> workingWeekdays = WorkingDaysService.defaultWorkingWeekdays,
   }) async {
     final workbook = xlsx.Excel.createExcel();
     final defaultSheetName = workbook.getDefaultSheet()!;
@@ -2412,15 +2930,17 @@ class ExportService {
 
     final detail = workbook['Detalle'];
     detail.appendRow([
+      xlsx.TextCellValue('Fecha'),
       xlsx.TextCellValue('Proyecto'),
       xlsx.TextCellValue('Actividad'),
-      xlsx.TextCellValue('Fecha inicio'),
-      xlsx.TextCellValue('Hora inicio'),
-      xlsx.TextCellValue('Fecha fin'),
-      xlsx.TextCellValue('Hora fin'),
-      xlsx.TextCellValue('Duracion'),
-      xlsx.TextCellValue('Horas'),
+      xlsx.TextCellValue('Duración'),
     ]);
+    _applyHeaderStyle(detail, columnCount: 4);
+    detail
+      ..setColumnWidth(0, 18)
+      ..setColumnWidth(1, 28)
+      ..setColumnWidth(2, 50)
+      ..setColumnWidth(3, 14);
 
     final sortedEntries = entries.toList()
       ..sort((a, b) => a.startAt.compareTo(b.startAt));
@@ -2428,19 +2948,42 @@ class ExportService {
       final project = projects[entry.projectId];
       final duration = entry.effectiveDuration;
       detail.appendRow([
+        xlsx.TextCellValue(_spreadsheetDateLabel(entry.startAt)),
         xlsx.TextCellValue(project?.name ?? 'Proyecto eliminado'),
         xlsx.TextCellValue(entry.description),
-        xlsx.TextCellValue(formatDate(entry.startAt)),
-        xlsx.TextCellValue(formatTime(entry.startAt)),
-        xlsx.TextCellValue(
-          entry.endAt == null ? '' : formatDate(entry.endAt!),
-        ),
-        xlsx.TextCellValue(
-          entry.endAt == null ? '' : formatTime(entry.endAt!),
-        ),
-        xlsx.TextCellValue(durationLabel(duration)),
-        xlsx.DoubleCellValue(duration.inSeconds / 3600),
+        xlsx.TextCellValue(_spreadsheetDurationLabel(duration)),
       ]);
+    }
+
+    final activitiesSheet = workbook['Actividades'];
+    activitiesSheet.appendRow([
+      xlsx.TextCellValue('No'),
+      xlsx.TextCellValue('Proyecto'),
+      xlsx.TextCellValue('Actividades'),
+      xlsx.TextCellValue('Fecha'),
+      xlsx.TextCellValue('Estatus'),
+    ]);
+    _applyHeaderStyle(activitiesSheet, columnCount: 5);
+    activitiesSheet
+      ..setColumnWidth(0, 6)
+      ..setColumnWidth(1, 28)
+      ..setColumnWidth(2, 50)
+      ..setColumnWidth(3, 18)
+      ..setColumnWidth(4, 14);
+    for (var i = 0; i < sortedEntries.length; i++) {
+      final entry = sortedEntries[i];
+      final project = projects[entry.projectId];
+      final rowIndex = i + 1;
+      activitiesSheet.appendRow([
+        xlsx.IntCellValue(rowIndex),
+        xlsx.TextCellValue(project?.name ?? 'Proyecto eliminado'),
+        xlsx.TextCellValue(entry.description),
+        xlsx.TextCellValue(_spreadsheetDateLabel(entry.startAt)),
+        xlsx.TextCellValue(entry.statusLabel),
+      ]);
+      activitiesSheet
+          .cell(xlsx.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIndex))
+          .cellStyle = _statusCellStyle(entry.statusLabel);
     }
 
     final summary = workbook['Resumen diario'];
@@ -2450,7 +2993,15 @@ class ExportService {
       xlsx.TextCellValue('Horas extra'),
       xlsx.TextCellValue('Horas totales'),
     ]);
-    for (final split in dailySplits(entries, start, end)) {
+    _applyHeaderStyle(summary, columnCount: 4);
+    for (final split
+        in dailySplits(
+          entries,
+          start,
+          end,
+          inactiveDays: inactiveDays,
+          workingWeekdays: workingWeekdays,
+        )) {
       summary.appendRow([
         xlsx.TextCellValue(formatDate(split.day)),
         xlsx.DoubleCellValue(split.regular.inSeconds / 3600),
@@ -2470,6 +3021,46 @@ class ExportService {
     );
     await file.writeAsBytes(bytes, flush: true);
     return file;
+  }
+
+  void _applyHeaderStyle(xlsx.Sheet sheet, {required int columnCount}) {
+    final style = xlsx.CellStyle(
+      backgroundColorHex: xlsx.ExcelColor.black,
+      fontColorHex: xlsx.ExcelColor.white,
+      bold: true,
+    );
+    for (var column = 0; column < columnCount; column++) {
+      sheet
+          .cell(xlsx.CellIndex.indexByColumnRow(columnIndex: column, rowIndex: 0))
+          .cellStyle = style;
+    }
+  }
+
+  /// Mismos colores que la referencia: amarillo para 'En proceso', verde
+  /// para 'Terminado' y gris en cursiva para 'Detenido'.
+  xlsx.CellStyle _statusCellStyle(String statusLabel) {
+    switch (statusLabel) {
+      case 'En proceso':
+        return xlsx.CellStyle(
+          backgroundColorHex: xlsx.ExcelColor.fromHexString('FFFFEB9C'),
+          fontColorHex: xlsx.ExcelColor.fromHexString('FF9C6500'),
+          bold: true,
+        );
+      case 'Terminado':
+        return xlsx.CellStyle(
+          backgroundColorHex: xlsx.ExcelColor.fromHexString('FFC6EFCE'),
+          fontColorHex: xlsx.ExcelColor.fromHexString('FF006100'),
+          bold: true,
+        );
+      case 'Detenido':
+        return xlsx.CellStyle(
+          backgroundColorHex: xlsx.ExcelColor.fromHexString('FFD9D9D9'),
+          fontColorHex: xlsx.ExcelColor.black,
+          italic: true,
+        );
+      default:
+        return xlsx.CellStyle();
+    }
   }
 }
 
@@ -2630,6 +3221,7 @@ class ActivityEntry {
   }
 
   ActivityEntry copyWith({
+    String? description,
     DateTime? endAt,
     int? pausedSeconds,
     DateTime? pausedAt,
@@ -2637,12 +3229,20 @@ class ActivityEntry {
   }) => ActivityEntry(
     id: id,
     projectId: projectId,
-    description: description,
+    description: description ?? this.description,
     startAt: startAt,
     endAt: endAt ?? this.endAt,
     pausedSeconds: pausedSeconds ?? this.pausedSeconds,
     pausedAt: clearPausedAt ? null : pausedAt ?? this.pausedAt,
   );
+
+  /// 'En proceso' (corriendo), 'Detenido' (en pausa) o 'Terminado' (ya
+  /// finalizada). Usado tanto en la UI como en el export a Excel.
+  String get statusLabel {
+    if (!isRunning) return 'Terminado';
+    if (isPaused) return 'Detenido';
+    return 'En proceso';
+  }
 
   Map<String, Object?> toDbRow() => {
     'id': id,
@@ -2749,6 +3349,18 @@ String durationLabel(Duration duration) {
   ].join(':');
 }
 
+String _spreadsheetDateLabel(DateTime value) {
+  return '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')} '
+      '${_weekdayNames[value.weekday]}';
+}
+
+String _spreadsheetDurationLabel(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$hours:$minutes:$seconds';
+}
+
 String compactDurationLabel(Duration duration) {
   final hours = duration.inHours;
   final minutes = duration.inMinutes.remainder(60);
@@ -2811,22 +3423,33 @@ class DailySplit {
   Duration get total => regular + overtime;
 }
 
+/// Un dia cuenta integro como hora adicional (no se aplica el umbral
+/// normal) si esta en [inactiveDays] (dia inhabil especifico, por ejemplo
+/// vacaciones o un feriado) o si su dia de la semana no esta en
+/// [workingWeekdays] (patron semanal de dias laborales configurado en
+/// Ajustes).
 List<DailySplit> dailySplits(
   List<ActivityEntry> activities,
   DateTime start,
-  DateTime end,
-) {
+  DateTime end, {
+  Set<DateTime> inactiveDays = const {},
+  Set<int> workingWeekdays = WorkingDaysService.defaultWorkingWeekdays,
+}) {
   return [
     for (final entry in dailyDurations(activities, start, end))
-      DailySplit(
-        day: entry.key,
-        regular: entry.value > dailyOvertimeThreshold
-            ? dailyOvertimeThreshold
-            : entry.value,
-        overtime: entry.value > dailyOvertimeThreshold
-            ? entry.value - dailyOvertimeThreshold
-            : Duration.zero,
-      ),
+      if (inactiveDays.contains(entry.key) ||
+          !workingWeekdays.contains(entry.key.weekday))
+        DailySplit(day: entry.key, regular: Duration.zero, overtime: entry.value)
+      else
+        DailySplit(
+          day: entry.key,
+          regular: entry.value > dailyOvertimeThreshold
+              ? dailyOvertimeThreshold
+              : entry.value,
+          overtime: entry.value > dailyOvertimeThreshold
+              ? entry.value - dailyOvertimeThreshold
+              : Duration.zero,
+        ),
   ];
 }
 
@@ -2839,6 +3462,30 @@ const _weekdayShortNames = [
   'vie',
   'sab',
   'dom',
+];
+
+/// Etiquetas del selector de dias laborales en Ajustes (indice = weekday,
+/// 1 = lunes ... 7 = domingo, igual que `DateTime.weekday`).
+const _weekdayToggleLabels = [
+  '',
+  'Lun',
+  'Mar',
+  'Mié',
+  'Jue',
+  'Vie',
+  'Sáb',
+  'Dom',
+];
+
+const _weekdayNames = [
+  '',
+  'Lunes',
+  'Martes',
+  'Miércoles',
+  'Jueves',
+  'Viernes',
+  'Sábado',
+  'Domingo',
 ];
 
 String dayShortLabel(DateTime day) {
