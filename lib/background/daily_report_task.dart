@@ -1,7 +1,7 @@
 import 'package:workmanager/workmanager.dart';
 
 import '../main.dart'
-    show ActivityEntry, ExportService, Project, dateKey, dayOnly, formatDate;
+    show ActivityEntry, ExportService, Project, dayOnly, formatDate;
 import '../services/email_service.dart';
 import '../services/email_settings_service.dart';
 import '../services/holidays_service.dart';
@@ -27,22 +27,22 @@ void dailyReportCallbackDispatcher() {
       final settings = await EmailSettingsService(localStorage).load();
       if (settings.enabled && settings.isConfigured) {
         final today = dayOnly(DateTime.now());
-        final todayKey = dateKey(today);
 
         final storedProjects = await localStorage.readProjects();
         final projects = storedProjects.map(Project.fromDbRow).toList();
 
+        // Se pasan todas las actividades: el Excel filtra las de hoy y
+        // arrastra las que siguen abiertas de dias anteriores.
         final storedActivities = await localStorage.readActivities();
-        final todaysActivities = storedActivities
+        final activities = storedActivities
             .map(ActivityEntry.fromDbRow)
-            .where((activity) => dateKey(activity.startAt) == todayKey)
             .toList();
 
         final inactiveDays = await HolidaysService(localStorage).load();
         final workingWeekdays = await WorkingDaysService(localStorage).load();
 
         final file = await ExportService().writeXlsx(
-          entries: todaysActivities,
+          activities: activities,
           projects: {for (final project in projects) project.id: project},
           start: today,
           end: today,

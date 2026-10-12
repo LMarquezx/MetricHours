@@ -8,7 +8,7 @@ import 'package:sqflite/sqflite.dart';
 /// del directorio de documentos que Android asigna a esta aplicacion.
 class LocalStorageService {
   static const _dbName = 'metric_hours.db';
-  static const _dbVersion = 2;
+  static const _dbVersion = 3;
 
   Database? _db;
 
@@ -42,7 +42,8 @@ class LocalStorageService {
             startAt TEXT NOT NULL,
             endAt TEXT,
             pausedSeconds INTEGER NOT NULL DEFAULT 0,
-            pausedAt TEXT
+            pausedAt TEXT,
+            pending INTEGER NOT NULL DEFAULT 0
           )
         ''');
         await db.execute('''
@@ -60,6 +61,12 @@ class LocalStorageService {
               value TEXT
             )
           ''');
+        }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE activities '
+            'ADD COLUMN pending INTEGER NOT NULL DEFAULT 0',
+          );
         }
       },
     );
@@ -93,6 +100,11 @@ class LocalStorageService {
       row,
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<void> deleteActivity(String id) async {
+    final db = await _database();
+    await db.delete('activities', where: 'id = ?', whereArgs: [id]);
   }
 
   Future<String?> readSetting(String key) async {

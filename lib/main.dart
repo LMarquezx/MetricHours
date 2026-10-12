@@ -387,7 +387,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final today = dayOnly(DateTime.now());
       final file = await app.exportService.writeXlsx(
-        entries: app.activitiesForDay(today),
+        activities: app.activities,
         projects: {for (final project in app.projects) project.id: project},
         start: today,
         end: today,
@@ -781,26 +781,30 @@ class _SettingsPageState extends State<SettingsPage> {
 class RegisterPage extends StatelessWidget {
   const RegisterPage({super.key});
 
+  /// Abre la hoja de captura. Con [pending] la actividad solo se agenda como
+  /// tarea por hacer (no se inicia ni cambia el dia seleccionado).
   Future<void> _openNewActivitySheet(
     BuildContext context,
-    AppController app,
-  ) async {
+    AppController app, {
+    bool pending = false,
+  }) async {
     if (app.activeProjects.isEmpty) {
       _showMessage(context, 'Da de alta un proyecto activo primero.');
       return;
     }
 
-    final started = await showModalBottomSheet<bool>(
+    final saved = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => _NewActivitySheet(app: app),
+      builder: (context) => _NewActivitySheet(app: app, pending: pending),
     );
 
-    if (started == true &&
+    if (!pending &&
+        saved == true &&
         context.mounted &&
         !isSameDay(app.selectedDay, DateTime.now())) {
       app.selectDay(DateTime.now());
@@ -814,8 +818,12 @@ class RegisterPage extends StatelessWidget {
     return AnimatedBuilder(
       animation: app,
       builder: (context, _) {
-        final activities = app.activitiesForDay(app.selectedDay);
+        final activities = app.activitiesForDay(
+          app.selectedDay,
+          includePending: false,
+        );
         final pausedActivities = app.pausedActivities;
+        final pendingActivities = app.pendingActivities;
         final isExtraHoursDay = app.isExtraHoursDay(app.selectedDay);
 
         return ListView(
@@ -880,6 +888,34 @@ class RegisterPage extends StatelessWidget {
                   project: app.projectById(activity.projectId),
                 ),
             ],
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Pendientes (${pendingActivities.length})',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.playlist_add),
+                  label: const Text('Agregar'),
+                  onPressed: () =>
+                      _openNewActivitySheet(context, app, pending: true),
+                ),
+              ],
+            ),
+            if (pendingActivities.isEmpty)
+              Text(
+                'Agenda tareas por hacer para iniciarlas despues.',
+                style: Theme.of(context).textTheme.bodySmall,
+              )
+            else
+              for (final activity in pendingActivities)
+                PendingActivityCard(
+                  activity: activity,
+                  project: app.projectById(activity.projectId),
+                ),
             const SizedBox(height: 20),
             Text(
               'Actividades ${formatDate(app.selectedDay)}',
@@ -979,14 +1015,7 @@ class ActiveActivityPanel extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _editActivityDescription(context, app, activity),
-                  child: const Padding(
-                    padding: EdgeInsets.all(4),
-                    child: Icon(Icons.edit_outlined, size: 20),
-                  ),
-                ),
+                _ActivityActionIcons(activity: activity, size: 20),
               ],
             ),
             const SizedBox(height: 16),
@@ -1064,14 +1093,7 @@ class PausedActivityCard extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _editActivityDescription(context, app, activity),
-                  child: const Padding(
-                    padding: EdgeInsets.all(2),
-                    child: Icon(Icons.edit_outlined, size: 18),
-                  ),
-                ),
+                _ActivityActionIcons(activity: activity),
               ],
             ),
             const SizedBox(height: 10),
@@ -1101,10 +1123,84 @@ class PausedActivityCard extends StatelessWidget {
   }
 }
 
+/// Tarea agendada que todavia no se inicia. "Iniciar" la convierte en la
+/// actividad en curso y la saca de esta lista.
+class PendingActivityCard extends StatelessWidget {
+  const PendingActivityCard({
+    required this.activity,
+    required this.project,
+    super.key,
+  });
+
+  final ActivityEntry activity;
+  final Project project;
+
+  Future<void> _start(BuildContext context, AppController app) async {
+    try {
+      await app.startPendingActivity(activity.id);
+    } on AppException catch (error) {
+      if (context.mounted) {
+        _showMessage(context, error.message);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+
+    return Card(
+      margin: const EdgeInsets.only(top: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(child: ProjectName(project: project)),
+                Text(
+                  'Agendada ${formatDate(activity.startAt)}',
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    activity.description,
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                _ActivityActionIcons(activity: activity),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.tonalIcon(
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Iniciar'),
+                onPressed: () => _start(context, app),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _NewActivitySheet extends StatefulWidget {
-  const _NewActivitySheet({required this.app});
+  const _NewActivitySheet({required this.app, this.pending = false});
 
   final AppController app;
+
+  /// `true` para agendar la actividad como pendiente en lugar de iniciarla.
+  final bool pending;
 
   @override
   State<_NewActivitySheet> createState() => _NewActivitySheetState();
@@ -1184,10 +1280,17 @@ class _NewActivitySheetState extends State<_NewActivitySheet> {
 
     setState(() => submitting = true);
     try {
-      await widget.app.startActivity(
-        projectId: projectId,
-        description: descriptionController.text,
-      );
+      if (widget.pending) {
+        await widget.app.addPendingActivity(
+          projectId: projectId,
+          description: descriptionController.text,
+        );
+      } else {
+        await widget.app.startActivity(
+          projectId: projectId,
+          description: descriptionController.text,
+        );
+      }
       if (mounted) {
         Navigator.of(context).pop(true);
       }
@@ -1226,7 +1329,7 @@ class _NewActivitySheetState extends State<_NewActivitySheet> {
           ),
           const SizedBox(height: 16),
           Text(
-            'Nueva actividad',
+            widget.pending ? 'Nuevo pendiente' : 'Nueva actividad',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleLarge,
           ),
@@ -1239,7 +1342,9 @@ class _NewActivitySheetState extends State<_NewActivitySheet> {
             textInputAction: TextInputAction.done,
             decoration: InputDecoration(
               labelText: 'Actividad',
-              hintText: 'Describe lo que estas haciendo',
+              hintText: widget.pending
+                  ? 'Describe lo que tienes por hacer'
+                  : 'Describe lo que estas haciendo',
               prefixIcon: const Icon(Icons.edit_note),
               suffixIcon: IconButton(
                 tooltip: speechBusy ? 'Detener voz' : 'Dictar voz',
@@ -1273,8 +1378,10 @@ class _NewActivitySheetState extends State<_NewActivitySheet> {
               const SizedBox(width: 12),
               Expanded(
                 child: FilledButton.icon(
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Guardar'),
+                  icon: Icon(
+                    widget.pending ? Icons.playlist_add : Icons.play_arrow,
+                  ),
+                  label: Text(widget.pending ? 'Agendar' : 'Guardar'),
                   onPressed: submitting ? null : _submit,
                 ),
               ),
@@ -1700,8 +1807,8 @@ class _ReportsPageState extends State<ReportsPage> {
       return;
     }
 
-    final entries = app.activitiesInRange(range.start, range.end);
-    if (entries.isEmpty) {
+    final rows = activityStatusRows(app.activities, range.start, range.end);
+    if (rows.isEmpty) {
       _showMessage(context, 'El rango seleccionado no tiene actividades.');
       return;
     }
@@ -1721,7 +1828,10 @@ class _ReportsPageState extends State<ReportsPage> {
       animation: app,
       builder: (context, _) {
         final today = dayOnly(DateTime.now());
-        final todayActivities = app.activitiesForDay(today);
+        final todayActivities = app.activitiesForDay(
+          today,
+          includePending: false,
+        );
         final totalDuration = todayActivities.fold<Duration>(
           Duration.zero,
           (value, activity) => value + activity.effectiveDuration,
@@ -1736,7 +1846,7 @@ class _ReportsPageState extends State<ReportsPage> {
         final weekStart = startOfWeek(today);
         final weekEnd = endOfWeek(today);
         final weeklySplits = dailySplits(
-          app.activitiesInRange(weekStart, weekEnd),
+          app.activitiesInRange(weekStart, weekEnd, includePending: false),
           weekStart,
           weekEnd,
           inactiveDays: app.inactiveDays,
@@ -1745,6 +1855,7 @@ class _ReportsPageState extends State<ReportsPage> {
         final projectActivities = app.activitiesInRange(
           _projectReportStart,
           _projectReportEnd,
+          includePending: false,
         );
         final projectTotals = app.projectTotalsFor(projectActivities);
         final projectRangeLabel = _projectReportStart == _projectReportEnd
@@ -2137,28 +2248,112 @@ class DateButton extends StatelessWidget {
   }
 }
 
-/// Abre el dialogo de edicion de descripcion para [activity] y, si se
-/// confirma, guarda el cambio via [app]. Compartido por los widgets que
-/// muestran una actividad (activa, pausada o del historial).
-Future<void> _editActivityDescription(
+/// Abre el dialogo de edicion (descripcion y proyecto) para [activity] y, si
+/// se confirma, guarda el cambio via [app]. Compartido por los widgets que
+/// muestran una actividad (activa, pausada, pendiente o del historial).
+Future<void> _editActivity(
   BuildContext context,
   AppController app,
   ActivityEntry activity,
 ) async {
-  final newDescription = await showDialog<String>(
+  // Proyectos activos, mas el actual aunque ya este dado de baja para que
+  // siga apareciendo seleccionado.
+  final projects = app.projects
+      .where((project) => project.isActive || project.id == activity.projectId)
+      .toList();
+  final result = await showDialog<({String description, String projectId})>(
     context: context,
     builder: (context) =>
-        _EditActivityDescriptionDialog(initialDescription: activity.description),
+        _EditActivityDialog(activity: activity, projects: projects),
   );
-  if (newDescription == null || !context.mounted) {
+  if (result == null || !context.mounted) {
     return;
   }
   try {
-    await app.updateActivityDescription(activity.id, newDescription);
+    await app.updateActivity(
+      activity.id,
+      description: result.description,
+      projectId: result.projectId,
+    );
   } on AppException catch (error) {
     if (context.mounted) {
       _showMessage(context, error.message);
     }
+  }
+}
+
+/// Pide confirmacion y elimina [activity] sin importar su estado.
+Future<void> _deleteActivity(
+  BuildContext context,
+  AppController app,
+  ActivityEntry activity,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Eliminar actividad'),
+      content: Text(
+        '¿Eliminar "${activity.description}"? Esta accion no se puede '
+        'deshacer.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancelar'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.error,
+            foregroundColor: Theme.of(context).colorScheme.onError,
+          ),
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Eliminar'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) {
+    return;
+  }
+  await app.deleteActivity(activity.id);
+}
+
+/// Iconos de editar y eliminar que acompanan a la descripcion de una
+/// actividad en cualquiera de sus estados.
+class _ActivityActionIcons extends StatelessWidget {
+  const _ActivityActionIcons({required this.activity, this.size = 18});
+
+  final ActivityEntry activity;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final app = AppScope.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => _editActivity(context, app, activity),
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(Icons.edit_outlined, size: size),
+          ),
+        ),
+        InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => _deleteActivity(context, app, activity),
+          child: Padding(
+            padding: const EdgeInsets.all(4),
+            child: Icon(
+              Icons.delete_outline,
+              size: size,
+              color: Theme.of(context).colorScheme.error,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -2174,7 +2369,6 @@ class ActivityTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final app = AppScope.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -2201,14 +2395,7 @@ class ActivityTile extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
                 ),
-                InkWell(
-                  borderRadius: BorderRadius.circular(16),
-                  onTap: () => _editActivityDescription(context, app, activity),
-                  child: const Padding(
-                    padding: EdgeInsets.all(2),
-                    child: Icon(Icons.edit_outlined, size: 18),
-                  ),
-                ),
+                _ActivityActionIcons(activity: activity),
               ],
             ),
             const SizedBox(height: 8),
@@ -2240,24 +2427,25 @@ class ActivityTile extends StatelessWidget {
   }
 }
 
-class _EditActivityDescriptionDialog extends StatefulWidget {
-  const _EditActivityDescriptionDialog({required this.initialDescription});
+class _EditActivityDialog extends StatefulWidget {
+  const _EditActivityDialog({required this.activity, required this.projects});
 
-  final String initialDescription;
+  final ActivityEntry activity;
+  final List<Project> projects;
 
   @override
-  State<_EditActivityDescriptionDialog> createState() =>
-      _EditActivityDescriptionDialogState();
+  State<_EditActivityDialog> createState() => _EditActivityDialogState();
 }
 
-class _EditActivityDescriptionDialogState
-    extends State<_EditActivityDescriptionDialog> {
+class _EditActivityDialogState extends State<_EditActivityDialog> {
   late final TextEditingController _controller;
+  late String _projectId;
 
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: widget.initialDescription);
+    _controller = TextEditingController(text: widget.activity.description);
+    _projectId = widget.activity.projectId;
   }
 
   @override
@@ -2266,23 +2454,46 @@ class _EditActivityDescriptionDialogState
     super.dispose();
   }
 
-  void _pop() => Navigator.of(context).pop(_controller.text);
+  void _pop() {
+    Navigator.of(
+      context,
+    ).pop((description: _controller.text, projectId: _projectId));
+  }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
       title: const Text('Editar actividad'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        minLines: 2,
-        maxLines: 4,
-        textInputAction: TextInputAction.done,
-        decoration: const InputDecoration(
-          labelText: 'Actividad',
-          prefixIcon: Icon(Icons.edit_note),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              minLines: 2,
+              maxLines: 4,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: 'Actividad',
+                prefixIcon: Icon(Icons.edit_note),
+              ),
+              onSubmitted: (_) => _pop(),
+            ),
+            const SizedBox(height: 16),
+            Text('Proyecto', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            for (final project in widget.projects) ...[
+              _ProjectBadgeOption(
+                project: project,
+                selected: project.id == _projectId,
+                onTap: () => setState(() => _projectId = project.id),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
         ),
-        onSubmitted: (_) => _pop(),
       ),
       actions: [
         TextButton(
@@ -2449,6 +2660,14 @@ class AppController extends ChangeNotifier {
     return list;
   }
 
+  /// Tareas agendadas que todavia no se inician, de la mas antigua a la mas
+  /// reciente (en el orden en que se fueron agendando).
+  List<ActivityEntry> get pendingActivities {
+    final list = activities.where((activity) => activity.isPending).toList()
+      ..sort((a, b) => a.startAt.compareTo(b.startAt));
+    return list;
+  }
+
   List<DateTime> get sortedInactiveDays => inactiveDays.toList()..sort();
 
   bool isInactiveDay(DateTime day) => inactiveDays.contains(dayOnly(day));
@@ -2528,23 +2747,39 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  List<ActivityEntry> activitiesForDay(DateTime day) {
+  /// Actividades del dia. Las tareas pendientes (no iniciadas) se incluyen
+  /// por defecto, porque el Excel las reporta con estatus 'No iniciado'; la
+  /// UI las excluye con [includePending] porque las muestra en su propia
+  /// seccion.
+  List<ActivityEntry> activitiesForDay(
+    DateTime day, {
+    bool includePending = true,
+  }) {
     final key = dateKey(day);
     final result =
         activities
-            .where((activity) => dateKey(activity.startAt) == key)
+            .where(
+              (activity) =>
+                  (includePending || !activity.isPending) &&
+                  dateKey(activity.startAt) == key,
+            )
             .toList()
           ..sort((a, b) => b.startAt.compareTo(a.startAt));
     return result;
   }
 
-  List<ActivityEntry> activitiesInRange(DateTime start, DateTime end) {
+  List<ActivityEntry> activitiesInRange(
+    DateTime start,
+    DateTime end, {
+    bool includePending = true,
+  }) {
     final from = dayOnly(start);
     final toExclusive = dayOnly(end).add(const Duration(days: 1));
     final result =
         activities
             .where(
               (activity) =>
+                  (includePending || !activity.isPending) &&
                   !activity.startAt.isBefore(from) &&
                   activity.startAt.isBefore(toExclusive),
             )
@@ -2568,13 +2803,18 @@ class AppController extends ChangeNotifier {
 
   int activityCountForProject(String projectId) {
     return activities
-        .where((activity) => activity.projectId == projectId)
+        .where(
+          (activity) => activity.projectId == projectId && !activity.isPending,
+        )
         .length;
   }
 
   Map<Project, ProjectTotal> projectTotalsFor(List<ActivityEntry> entries) {
     final totals = <String, ProjectTotal>{};
     for (final activity in entries) {
+      if (activity.isPending) {
+        continue;
+      }
       final current = totals[activity.projectId] ?? ProjectTotal.empty();
       totals[activity.projectId] = ProjectTotal(
         count: current.count + 1,
@@ -2682,6 +2922,63 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Agenda una tarea por hacer sin iniciarla: no cuenta tiempo ni afecta la
+  /// actividad que este corriendo. Se inicia despues con
+  /// [startPendingActivity].
+  Future<void> addPendingActivity({
+    required String projectId,
+    required String description,
+  }) async {
+    final cleanDescription = description.trim();
+    if (cleanDescription.isEmpty) {
+      throw const AppException('Describe la actividad.');
+    }
+    final project = projectById(projectId);
+    if (!project.isActive) {
+      throw const AppException('El proyecto seleccionado no esta activo.');
+    }
+
+    final entry = ActivityEntry(
+      id: _newId(),
+      projectId: projectId,
+      description: cleanDescription,
+      startAt: DateTime.now(),
+      isPending: true,
+    );
+    _upsertActivity(entry);
+    await localStorage.upsertActivity(entry.toDbRow());
+    notifyListeners();
+  }
+
+  /// Convierte una tarea pendiente en una actividad en curso: sale de la
+  /// lista de pendientes y empieza a contar desde ahora. Igual que
+  /// [startActivity], pausa la que estuviera corriendo.
+  Future<void> startPendingActivity(String id) async {
+    final index = activities.indexWhere((activity) => activity.id == id);
+    if (index == -1 || !activities[index].isPending) {
+      return;
+    }
+    final pending = activities[index];
+    if (!projectById(pending.projectId).isActive) {
+      throw const AppException(
+        'El proyecto de esta tarea esta dado de baja. Editala para '
+        'cambiarlo antes de iniciarla.',
+      );
+    }
+
+    final current = activeActivity;
+    if (current != null) {
+      await pauseActivity(current.id);
+    }
+
+    final started = pending.copyWith(startAt: DateTime.now(), isPending: false);
+    _upsertActivity(started);
+    selectedDay = dayOnly(DateTime.now());
+    await localStorage.upsertActivity(started.toDbRow());
+    await _refreshNotification();
+    notifyListeners();
+  }
+
   Future<void> pauseActivity(String id) async {
     final index = activities.indexWhere((activity) => activity.id == id);
     if (index == -1) {
@@ -2752,13 +3049,15 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Permite corregir la descripcion de una actividad ya creada, sin
-  /// importar si sigue corriendo, esta pausada o ya termino.
-  Future<void> updateActivityDescription(
-    String id,
-    String rawDescription,
-  ) async {
-    final cleanDescription = rawDescription.trim();
+  /// Permite corregir la descripcion y el proyecto de una actividad ya
+  /// creada, sin importar si sigue corriendo, esta pausada, ya termino o
+  /// todavia no se inicia.
+  Future<void> updateActivity(
+    String id, {
+    required String description,
+    required String projectId,
+  }) async {
+    final cleanDescription = description.trim();
     if (cleanDescription.isEmpty) {
       throw const AppException('Describe la actividad.');
     }
@@ -2766,9 +3065,29 @@ class AppController extends ChangeNotifier {
     if (index == -1) {
       return;
     }
-    final updated = activities[index].copyWith(description: cleanDescription);
+    final current = activities[index];
+    if (projectId != current.projectId && !projectById(projectId).isActive) {
+      throw const AppException('El proyecto seleccionado no esta activo.');
+    }
+    final updated = current.copyWith(
+      description: cleanDescription,
+      projectId: projectId,
+    );
     activities[index] = updated;
     await localStorage.upsertActivity(updated.toDbRow());
+    await _refreshNotification();
+    notifyListeners();
+  }
+
+  /// Elimina una actividad sin importar su estado (pendiente, en curso, en
+  /// pausa o terminada).
+  Future<void> deleteActivity(String id) async {
+    final index = activities.indexWhere((activity) => activity.id == id);
+    if (index == -1) {
+      return;
+    }
+    activities.removeAt(index);
+    await localStorage.deleteActivity(id);
     await _refreshNotification();
     notifyListeners();
   }
@@ -2852,9 +3171,8 @@ class AppController extends ChangeNotifier {
   }) async {
     final normalizedStart = dayOnly(start);
     final normalizedEnd = dayOnly(end);
-    final entries = activitiesInRange(normalizedStart, normalizedEnd);
     final file = await exportService.writeXlsx(
-      entries: entries,
+      activities: activities,
       projects: {for (final project in projects) project.id: project},
       start: normalizedStart,
       end: normalizedEnd,
@@ -2916,8 +3234,12 @@ class AppController extends ChangeNotifier {
 }
 
 class ExportService {
+  /// Genera el Excel del rango [start]-[end] a partir de **todas** las
+  /// [activities]: el detalle y el resumen de horas usan las que iniciaron
+  /// dentro del rango, y la hoja "Actividades" ademas arrastra las que
+  /// siguen abiertas (ver [activityStatusRows]).
   Future<File> writeXlsx({
-    required List<ActivityEntry> entries,
+    required List<ActivityEntry> activities,
     required Map<String, Project> projects,
     required DateTime start,
     required DateTime end,
@@ -2942,6 +3264,15 @@ class ExportService {
       ..setColumnWidth(2, 50)
       ..setColumnWidth(3, 14);
 
+    final rangeStart = dayOnly(start);
+    final rangeEndExclusive = dayOnly(end).add(const Duration(days: 1));
+    final entries = activities
+        .where(
+          (activity) =>
+              !activity.startAt.isBefore(rangeStart) &&
+              activity.startAt.isBefore(rangeEndExclusive),
+        )
+        .toList();
     final sortedEntries = entries.toList()
       ..sort((a, b) => a.startAt.compareTo(b.startAt));
     for (final entry in sortedEntries) {
@@ -2970,20 +3301,21 @@ class ExportService {
       ..setColumnWidth(2, 50)
       ..setColumnWidth(3, 18)
       ..setColumnWidth(4, 14);
-    for (var i = 0; i < sortedEntries.length; i++) {
-      final entry = sortedEntries[i];
-      final project = projects[entry.projectId];
+    final statusRows = activityStatusRows(activities, start, end);
+    for (var i = 0; i < statusRows.length; i++) {
+      final row = statusRows[i];
+      final project = projects[row.entry.projectId];
       final rowIndex = i + 1;
       activitiesSheet.appendRow([
         xlsx.IntCellValue(rowIndex),
         xlsx.TextCellValue(project?.name ?? 'Proyecto eliminado'),
-        xlsx.TextCellValue(entry.description),
-        xlsx.TextCellValue(_spreadsheetDateLabel(entry.startAt)),
-        xlsx.TextCellValue(entry.statusLabel),
+        xlsx.TextCellValue(row.entry.description),
+        xlsx.TextCellValue(formatDate(row.day)),
+        xlsx.TextCellValue(row.status),
       ]);
       activitiesSheet
           .cell(xlsx.CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIndex))
-          .cellStyle = _statusCellStyle(entry.statusLabel);
+          .cellStyle = _statusCellStyle(row.status);
     }
 
     final summary = workbook['Resumen diario'];
@@ -3037,9 +3369,16 @@ class ExportService {
   }
 
   /// Mismos colores que la referencia: amarillo para 'En proceso', verde
-  /// para 'Terminado' y gris en cursiva para 'Detenido'.
+  /// para 'Terminado' y gris en cursiva para 'Detenido'; fondo rojo tenue con
+  /// letra roja fuerte para 'No iniciado'.
   xlsx.CellStyle _statusCellStyle(String statusLabel) {
     switch (statusLabel) {
+      case 'No iniciado':
+        return xlsx.CellStyle(
+          backgroundColorHex: xlsx.ExcelColor.fromHexString('FFFFC7CE'),
+          fontColorHex: xlsx.ExcelColor.fromHexString('FFC00000'),
+          bold: true,
+        );
       case 'En proceso':
         return xlsx.CellStyle(
           backgroundColorHex: xlsx.ExcelColor.fromHexString('FFFFEB9C'),
@@ -3062,6 +3401,68 @@ class ExportService {
         return xlsx.CellStyle();
     }
   }
+}
+
+/// Una fila de la hoja "Actividades" del Excel: [entry] tal como aparece el
+/// dia [day] con el estatus [status].
+typedef ActivityStatusRow = ({ActivityEntry entry, DateTime day, String status});
+
+/// Orden en que se listan los estatus en la hoja "Actividades".
+const _statusSortOrder = {
+  'En proceso': 0,
+  'Terminado': 1,
+  'No iniciado': 2,
+  'Detenido': 3,
+};
+
+/// Filas de la hoja "Actividades" para el rango [start]-[end], ordenadas por
+/// estatus ([_statusSortOrder]) y, dentro de cada estatus, por dia.
+///
+/// Una actividad que sigue abierta (en curso, en pausa o pendiente) se
+/// arrastra: aparece cada dia, desde que se creo hasta hoy, o hasta el dia en
+/// que se termino. En los dias anteriores al ultimo se marca 'En proceso' (o
+/// 'No iniciado' si es pendiente); en el ultimo lleva su estatus real. Solo
+/// se arrastra el listado: las horas cuentan unicamente el dia en que la
+/// actividad inicio, para no duplicarlas en el resumen.
+List<ActivityStatusRow> activityStatusRows(
+  Iterable<ActivityEntry> activities,
+  DateTime start,
+  DateTime end,
+) {
+  final from = dayOnly(start);
+  final to = dayOnly(end);
+  final today = dayOnly(DateTime.now());
+  final rows = <ActivityStatusRow>[];
+  for (final activity in activities) {
+    final startDay = dayOnly(activity.startAt);
+    final endAt = activity.endAt;
+    var lastDay = endAt == null ? today : dayOnly(endAt);
+    if (lastDay.isBefore(startDay)) {
+      lastDay = startDay;
+    }
+    var day = startDay.isBefore(from) ? from : startDay;
+    final until = lastDay.isAfter(to) ? to : lastDay;
+    while (!day.isAfter(until)) {
+      rows.add((
+        entry: activity,
+        day: day,
+        status: activity.isPending || isSameDay(day, lastDay)
+            ? activity.statusLabel
+            : 'En proceso',
+      ));
+      day = DateTime(day.year, day.month, day.day + 1);
+    }
+  }
+  rows.sort((a, b) {
+    final byStatus = (_statusSortOrder[a.status] ?? _statusSortOrder.length)
+        .compareTo(_statusSortOrder[b.status] ?? _statusSortOrder.length);
+    if (byStatus != 0) {
+      return byStatus;
+    }
+    final byDay = a.day.compareTo(b.day);
+    return byDay != 0 ? byDay : a.entry.startAt.compareTo(b.entry.startAt);
+  });
+  return rows;
 }
 
 class Project {
@@ -3154,20 +3555,31 @@ class ActivityEntry {
     this.endAt,
     this.pausedSeconds = 0,
     this.pausedAt,
+    this.isPending = false,
   });
 
   final String id;
   final String projectId;
   final String description;
+
+  /// Inicio real de la actividad. Mientras [isPending] es `true` es solo el
+  /// momento en que se agendo, y se reemplaza al iniciarla.
   final DateTime startAt;
   final DateTime? endAt;
   final int pausedSeconds;
   final DateTime? pausedAt;
 
-  bool get isRunning => endAt == null;
+  /// Tarea agendada que todavia no se inicia: no cuenta tiempo ni se puede
+  /// pausar o detener hasta que se inicia.
+  final bool isPending;
+
+  bool get isRunning => !isPending && endAt == null;
   bool get isPaused => isRunning && pausedAt != null;
 
   Duration get effectiveDuration {
+    if (isPending) {
+      return Duration.zero;
+    }
     final reference = isPaused ? pausedAt! : (endAt ?? DateTime.now());
     if (reference.isBefore(startAt)) {
       return Duration.zero;
@@ -3217,28 +3629,35 @@ class ActivityEntry {
       pausedAt: row['pausedAt'] == null
           ? null
           : DateTime.parse(row['pausedAt'] as String),
+      isPending: (row['pending'] as int?) == 1,
     );
   }
 
   ActivityEntry copyWith({
+    String? projectId,
     String? description,
+    DateTime? startAt,
     DateTime? endAt,
     int? pausedSeconds,
     DateTime? pausedAt,
     bool clearPausedAt = false,
+    bool? isPending,
   }) => ActivityEntry(
     id: id,
-    projectId: projectId,
+    projectId: projectId ?? this.projectId,
     description: description ?? this.description,
-    startAt: startAt,
+    startAt: startAt ?? this.startAt,
     endAt: endAt ?? this.endAt,
     pausedSeconds: pausedSeconds ?? this.pausedSeconds,
     pausedAt: clearPausedAt ? null : pausedAt ?? this.pausedAt,
+    isPending: isPending ?? this.isPending,
   );
 
-  /// 'En proceso' (corriendo), 'Detenido' (en pausa) o 'Terminado' (ya
-  /// finalizada). Usado tanto en la UI como en el export a Excel.
+  /// 'No iniciado' (agendada), 'En proceso' (corriendo), 'Detenido' (en
+  /// pausa) o 'Terminado' (ya finalizada). Usado tanto en la UI como en el
+  /// export a Excel.
   String get statusLabel {
+    if (isPending) return 'No iniciado';
     if (!isRunning) return 'Terminado';
     if (isPaused) return 'Detenido';
     return 'En proceso';
@@ -3252,6 +3671,7 @@ class ActivityEntry {
     'endAt': endAt?.toIso8601String(),
     'pausedSeconds': pausedSeconds,
     'pausedAt': pausedAt?.toIso8601String(),
+    'pending': isPending ? 1 : 0,
   };
 }
 
